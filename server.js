@@ -571,7 +571,8 @@ async function processAndMergeSources(req) { // <-- MODIFIED
                 const fetchOptions = {
                     headers: { 'User-Agent': 'VLC/3.0.20 (Linux; x86_64)' }
                 };
-                const m3uUrl = `${server}?username=${username}&password=${password}&type=m3u_plus&output=ts`;
+                const m3uUri = process.env.M3U_URI || '/get.php';
+                const m3uUrl = `${server}${m3uUri}?username=${username}&password=${password}&type=m3u_plus&output=ts`;
                 console.log(`[M3U] Constructed XC URL for "${source.name}": ${m3uUrl}`);
                 sendProcessingStatus(req, ` -> Fetching content from XC server...`, 'info'); // <-- NEW
                 content = await fetchUrlContent(m3uUrl, fetchOptions);
