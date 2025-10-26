@@ -1,7 +1,7 @@
 # Stage 1: The Builder
 # Use the full CUDA development image to build dependencies.
 # We're using a specific version for reproducibility.
-FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:13.0.1-devel-ubuntu24.04 AS builder
 
 # Set environment to non-interactive to avoid prompts
 ENV DEBIAN_FRONTEND=noninteractive
@@ -12,7 +12,7 @@ RUN apt-get update && \
     build-essential \
     curl \
     gnupg && \
-    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -34,7 +34,7 @@ COPY . .
 # Stage 2: The Final Image
 # Use a much smaller CUDA 'base' image for the runtime environment.
 # This image contains the necessary NVIDIA drivers and libraries but not the full SDK.
-FROM nvidia/cuda:12.2.2-base-ubuntu22.04
+FROM nvidia/cuda:13.0.1-base-ubuntu24.04
 
 # Set environment variables for NVIDIA capabilities
 ENV NVIDIA_DRIVER_CAPABILITIES all
@@ -52,7 +52,7 @@ RUN apt-get update && \
     intel-media-va-driver \
     mesa-va-drivers \
     vainfo && \
-    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     # Clean up apt caches to reduce final image size
     apt-get clean && \
