@@ -50,6 +50,7 @@ RUN apt-get update && \
     ffmpeg \
     ca-certificates \
     intel-media-va-driver \
+    mesa-va-drivers \
     vainfo && \
     curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
