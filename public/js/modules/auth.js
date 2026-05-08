@@ -32,6 +32,7 @@ const initializeUIElements = () => {
     UIElements.channelColumnResizeHandle = document.getElementById('channel-column-resize-handle');
     UIElements.userDisplay = document.getElementById('user-display');
     UIElements.userManagementSection = document.getElementById('user-management-section');
+    UIElements.userEditorSourceList = document.getElementById('user-editor-source-list');
     // NOTE: dvrSettingsSection is the entire settings div, not a separate element. Logic will handle visibility.
 
 
@@ -87,6 +88,13 @@ const initializeUIElements = () => {
     UIElements.saveLayoutName = document.getElementById('save-layout-name');
     UIElements.saveLayoutCancelBtn = document.getElementById('save-layout-cancel-btn');
     UIElements.multiviewChannelFilter = document.getElementById('multiview-channel-filter');
+    // NEW: Multi-view custom URL elements
+    UIElements.multiviewSourceListBtn = document.getElementById('multiview-source-list-btn');
+    UIElements.multiviewSourceCustomBtn = document.getElementById('multiview-source-custom-btn');
+    UIElements.multiviewCustomUrlContainer = document.getElementById('multiview-custom-url-container');
+    UIElements.multiviewCustomUrlInput = document.getElementById('multiview-custom-url-input');
+    UIElements.multiviewCustomNameInput = document.getElementById('multiview-custom-name-input');
+    UIElements.multiviewCustomUrlPlayBtn = document.getElementById('multiview-custom-url-play-btn');
 
     // NEW: Player Page Elements
     UIElements.pagePlayer = document.getElementById('page-player');
@@ -97,7 +105,7 @@ const initializeUIElements = () => {
     UIElements.directPlayBtn = document.getElementById('direct-play-btn');
     UIElements.directPlayerContainer = document.getElementById('direct-player-container');
     UIElements.directVideoElement = document.getElementById('direct-video-element');
-    
+
     // DVR Elements
     UIElements.pageDvr = document.getElementById('page-dvr');
     UIElements.tabDvr = document.getElementById('tab-dvr');
@@ -136,6 +144,42 @@ const initializeUIElements = () => {
     UIElements.refreshActivityBtn = document.getElementById('refresh-activity-btn');
     UIElements.historySearchInput = document.getElementById('history-search-input');
 
+    // --- NEW: VOD Elements (Page & Details Modal) ---
+    UIElements.tabVod = document.getElementById('tab-vod');
+    UIElements.mobileNavVod = document.getElementById('mobile-nav-vod');
+    UIElements.pageVod = document.getElementById('page-vod');
+    UIElements.vodFilterBar = document.getElementById('vod-filter-bar');
+    UIElements.vodTypeAll = document.getElementById('vod-type-all');
+    UIElements.vodTypeMovies = document.getElementById('vod-type-movies');
+    UIElements.vodTypeSeries = document.getElementById('vod-type-series');
+    UIElements.vodGroupFilter = document.getElementById('vod-group-filter');
+    UIElements.vodSearchInput = document.getElementById('vod-search-input');
+    UIElements.vodGridContainer = document.getElementById('vod-grid-container');
+    UIElements.vodNoResults = document.getElementById('vod-no-results');
+    UIElements.vodGrid = document.getElementById('vod-grid');
+    UIElements.vodDetailsModal = document.getElementById('vod-details-modal');
+    UIElements.vodDetailsContainer = document.getElementById('vod-details-container');
+    UIElements.vodDetailsCloseBtn = document.getElementById('vod-details-close-btn');
+    UIElements.vodDetailsBackdrop = document.getElementById('vod-details-backdrop');
+    UIElements.vodDetailsBackdropImg = document.getElementById('vod-details-backdrop-img');
+    UIElements.vodDetailsContent = document.getElementById('vod-details-content');
+    UIElements.vodDetailsPoster = document.getElementById('vod-details-poster');
+    UIElements.vodDetailsTitle = document.getElementById('vod-details-title');
+    UIElements.vodDetailsMeta = document.getElementById('vod-details-meta');
+    UIElements.vodDetailsYear = document.getElementById('vod-details-year');
+    UIElements.vodDetailsRating = document.getElementById('vod-details-rating');
+    UIElements.vodDetailsType = document.getElementById('vod-details-type');
+    UIElements.vodDetailsDuration = document.getElementById('vod-details-duration');
+    UIElements.vodDetailsGenre = document.getElementById('vod-details-genre');
+    UIElements.vodDetailsDirector = document.getElementById('vod-details-director');
+    UIElements.vodDetailsCast = document.getElementById('vod-details-cast');
+    UIElements.vodDetailsDesc = document.getElementById('vod-details-desc');
+    UIElements.vodDetailsMovieActions = document.getElementById('vod-details-movie-actions');
+    UIElements.vodPlayMovieBtn = document.getElementById('vod-play-movie-btn');
+    UIElements.vodDetailsSeriesActions = document.getElementById('vod-details-series-actions');
+    UIElements.vodSeasonSelect = document.getElementById('vod-season-select');
+    UIElements.vodEpisodeList = document.getElementById('vod-episode-list');
+    // --- END VOD Elements ---
 
     // Settings Buttons
     UIElements.addM3uBtn = document.getElementById('add-m3u-btn');
@@ -148,7 +192,31 @@ const initializeUIElements = () => {
     UIElements.processingStatusBackgroundBtn = document.getElementById('processing-status-background-btn');
     UIElements.processingStatusCloseRefreshBtn = document.getElementById('processing-status-close-refresh-btn');
 
-    
+    // --- NEW: Group Filter Modal Elements ---
+    UIElements.groupFilterModal = document.getElementById('group-filter-modal');
+    UIElements.groupFilterCloseBtn = document.getElementById('group-filter-close-btn');
+    UIElements.groupFilterTabLive = document.getElementById('group-filter-tab-live');
+    UIElements.groupFilterTabMovies = document.getElementById('group-filter-tab-movies');
+    UIElements.groupFilterTabSeries = document.getElementById('group-filter-tab-series');
+    UIElements.groupFilterSelectAll = document.getElementById('group-filter-select-all');
+    UIElements.groupFilterDeselectAll = document.getElementById('group-filter-deselect-all');
+    UIElements.groupFilterSearch = document.getElementById('group-filter-search');
+    UIElements.groupFilterList = document.getElementById('group-filter-list');
+    UIElements.groupFilterCancelBtn = document.getElementById('group-filter-cancel-btn');
+    UIElements.groupFilterSaveBtn = document.getElementById('group-filter-save-btn');
+    // --- END Group Filter Elements ---
+
+    // --- NEW: Log Management Elements ---
+    UIElements.logFileCount = document.getElementById('log-file-count');
+    UIElements.logTotalSize = document.getElementById('log-total-size');
+    UIElements.logOldestDate = document.getElementById('log-oldest-date');
+    UIElements.logMaxFilesInput = document.getElementById('log-max-files-input');
+    UIElements.logMaxSizeInput = document.getElementById('log-max-size-input');
+    UIElements.logAutoDeleteDaysInput = document.getElementById('log-auto-delete-days-input');
+    UIElements.downloadLogsBtn = document.getElementById('download-logs-btn');
+    UIElements.clearLogsBtn = document.getElementById('clear-logs-btn');
+    // --- END Log Management Elements ---
+
 };
 
 
@@ -190,7 +258,7 @@ const showSetupScreen = () => {
     const setupForm = document.getElementById('setup-form');
     const authLoader = document.getElementById('auth-loader');
     const setupError = document.getElementById('setup-error');
-    
+
     console.log('[AUTH_UI] Displaying setup screen.');
     authContainer.classList.remove('hidden');
     appContainer.classList.add('hidden');
@@ -206,7 +274,7 @@ const showSetupScreen = () => {
  */
 const showApp = (user) => {
     appState.currentUser = user;
-    
+
     const authContainer = document.getElementById('auth-container');
     const appContainer = document.getElementById('app-container');
 
@@ -225,7 +293,7 @@ const showApp = (user) => {
     // This prevents race conditions during app initialization.
     UIElements.userDisplay.textContent = user.username;
     UIElements.userDisplay.classList.remove('hidden');
-    
+
     console.log(`[AUTH_UI] User display set to: ${user.username}.`);
 
     if (!appState.appInitialized) {
@@ -264,7 +332,7 @@ export async function checkAuthStatus() {
             console.log('[AUTH] User not logged in. Checking if setup is needed...');
             const setupRes = await fetch('/api/auth/needs-setup');
             if (!setupRes.ok) {
-                 console.warn(`[AUTH] /api/auth/needs-setup returned non-OK status: ${setupRes.status} ${setupRes.statusText}`);
+                console.warn(`[AUTH] /api/auth/needs-setup returned non-OK status: ${setupRes.status} ${setupRes.statusText}`);
             }
             const setup = await setupRes.json();
             console.log('[AUTH] /api/auth/needs-setup response:', setup);

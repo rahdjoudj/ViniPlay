@@ -15,6 +15,7 @@ import { initDirectPlayer, isDirectPlayerActive, cleanupDirectPlayer } from './p
 import { finalizeGuideLoad, handleGuideLoad } from './guide.js';
 import { fetchConfig } from './api.js';
 import { initActivityPage } from './admin.js';
+import { initVodPage } from './vod.js';
 
 
 let confirmCallback = null;
@@ -42,10 +43,10 @@ export const showNotification = (message, isError = false, duration = 3000) => {
     }
 
     UIElements.notificationMessage.textContent = message;
-    
+
     UIElements.notificationBox.classList.remove('success-bg', 'error-bg');
     UIElements.notificationBox.classList.add(isError ? 'error-bg' : 'success-bg');
-    
+
     UIElements.notificationModal.classList.remove('hidden');
 
     setTimeout(() => { UIElements.notificationModal.classList.add('hidden'); }, duration);
@@ -74,7 +75,7 @@ export const openModal = (modal) => {
             document.addEventListener('mouseup', onMouseUp, { once: true });
         }
     };
-    
+
     if (activeModalCloseListener && activeModalCloseListener.element) {
         activeModalCloseListener.element.removeEventListener('mousedown', activeModalCloseListener.handler);
     }
@@ -89,7 +90,7 @@ export const openModal = (modal) => {
  */
 export const closeModal = (modal) => {
     modal.classList.replace('flex', 'hidden');
-    
+
     if (activeModalCloseListener && activeModalCloseListener.element === modal) {
         activeModalCloseListener.element.removeEventListener('mousedown', activeModalCloseListener.handler);
         activeModalCloseListener = null;
@@ -172,29 +173,44 @@ export const setButtonLoadingState = (buttonEl, isLoading, originalContent) => {
 /**
  * Makes a modal window resizable by dragging a handle.
  */
-export const makeModalResizable = (handleEl, containerEl, minWidth, minHeight, settingKey) => {
+export const makeModalResizable = (handleEl, containerEl, minWidth, minHeight, settingKey, ratioCallback = null) => {
     import('./api.js').then(({ saveUserSetting }) => {
         let resizeDebounceTimer;
-        handleEl.addEventListener('mousedown', e => {
-            e.preventDefault();
-            isResizing = true; 
-            const startX = e.clientX,
-                startY = e.clientY;
+
+        const startResize = (clientX, clientY) => {
+            isResizing = true;
+            const startX = clientX;
+            const startY = clientY;
             const startWidth = containerEl.offsetWidth;
             const startHeight = containerEl.offsetHeight;
 
-            const doResize = (e) => {
-                const newWidth = startWidth + e.clientX - startX;
-                const newHeight = startHeight + e.clientY - startY;
-                containerEl.style.width = `${Math.max(minWidth, newWidth)}px`;
-                containerEl.style.height = `${Math.max(minHeight, newHeight)}px`;
+            const doResize = (moveEvent) => {
+                // Handle both mouse and touch events for coordinates
+                const currentX = moveEvent.touches ? moveEvent.touches[0].clientX : moveEvent.clientX;
+                const currentY = moveEvent.touches ? moveEvent.touches[0].clientY : moveEvent.clientY;
+
+                let newWidth = Math.max(minWidth, startWidth + currentX - startX);
+                let newHeight = Math.max(minHeight, startHeight + currentY - startY);
+
+                // Apply aspect ratio if callback is provided
+                if (ratioCallback) {
+                    const calculatedHeight = ratioCallback(newWidth);
+                    if (calculatedHeight) {
+                        newHeight = calculatedHeight;
+                    }
+                }
+
+                containerEl.style.width = `${newWidth}px`;
+                containerEl.style.height = `${newHeight}px`;
             };
 
             const stopResize = () => {
                 window.removeEventListener('mousemove', doResize);
                 window.removeEventListener('mouseup', stopResize);
+                window.removeEventListener('touchmove', doResize);
+                window.removeEventListener('touchend', stopResize);
                 document.body.style.cursor = '';
-                
+
                 isResizing = false;
 
                 clearTimeout(resizeDebounceTimer);
@@ -209,7 +225,19 @@ export const makeModalResizable = (handleEl, containerEl, minWidth, minHeight, s
             document.body.style.cursor = 'se-resize';
             window.addEventListener('mousemove', doResize);
             window.addEventListener('mouseup', stopResize);
+            window.addEventListener('touchmove', doResize, { passive: false });
+            window.addEventListener('touchend', stopResize);
+        };
+
+        handleEl.addEventListener('mousedown', e => {
+            e.preventDefault();
+            startResize(e.clientX, e.clientY);
         }, false);
+
+        handleEl.addEventListener('touchstart', e => {
+            e.preventDefault(); // Prevent scrolling while resizing
+            startResize(e.touches[0].clientX, e.touches[0].clientY);
+        }, { passive: false });
     });
 };
 
@@ -217,7 +245,10 @@ export const makeModalResizable = (handleEl, containerEl, minWidth, minHeight, s
  * Makes a column resizable horizontally by dragging a handle.
  */
 export const makeColumnResizable = (handleEl, targetEl, minWidth, settingKey, cssVarName) => {
-    import('./api.js').then(({ saveUserSetting }) => {
+    Promise.all([
+        import('./api.js'),
+        import('./guide.js')
+    ]).then(([{ saveUserSetting }, { updateNowLinePosition }]) => {
         let resizeDebounceTimer;
         let startWidth;
         let startX;
@@ -227,21 +258,27 @@ export const makeColumnResizable = (handleEl, targetEl, minWidth, settingKey, cs
             return;
         }
 
-        handleEl.addEventListener('mousedown', e => {
-            e.preventDefault();
+        const startResize = (clientX) => {
             isResizing = true;
-            startX = e.clientX;
+            startX = clientX;
             startWidth = parseInt(getComputedStyle(targetEl).getPropertyValue(cssVarName)) || minWidth;
-            
-            const doResize = (e) => {
-                const newWidth = startWidth + (e.clientX - startX);
+
+            const doResize = (moveEvent) => {
+                const currentX = moveEvent.touches ? moveEvent.touches[0].clientX : moveEvent.clientX;
+                const newWidth = startWidth + (currentX - startX);
                 const finalWidth = Math.max(minWidth, newWidth);
                 targetEl.style.setProperty(cssVarName, `${finalWidth}px`);
+
+                // CRITICAL: Update guideState immediately and recalculate NOW line position
+                guideState.settings.channelColumnWidth = finalWidth;
+                updateNowLinePosition();
             };
 
             const stopResize = () => {
                 window.removeEventListener('mousemove', doResize);
                 window.removeEventListener('mouseup', stopResize);
+                window.removeEventListener('touchmove', doResize);
+                window.removeEventListener('touchend', stopResize);
                 document.body.style.cursor = '';
                 isResizing = false;
 
@@ -255,7 +292,19 @@ export const makeColumnResizable = (handleEl, targetEl, minWidth, settingKey, cs
             document.body.style.cursor = 'ew-resize';
             window.addEventListener('mousemove', doResize);
             window.addEventListener('mouseup', stopResize);
+            window.addEventListener('touchmove', doResize, { passive: false });
+            window.addEventListener('touchend', stopResize);
+        };
+
+        handleEl.addEventListener('mousedown', e => {
+            e.preventDefault();
+            startResize(e.clientX);
         }, false);
+
+        handleEl.addEventListener('touchstart', e => {
+            e.preventDefault();
+            startResize(e.touches[0].clientX);
+        }, { passive: false });
     });
 };
 
@@ -314,7 +363,7 @@ export const handleRouteChange = () => {
     const wasMultiView = currentPage.startsWith('/multiview');
     const wasPlayer = currentPage.startsWith('/player');
     const path = window.location.pathname;
-    
+
     if (wasMultiView && !path.startsWith('/multiview')) {
         if (isMultiViewActive()) {
             showConfirm(
@@ -326,7 +375,7 @@ export const handleRouteChange = () => {
                 }
             );
             window.history.pushState({}, currentPage, window.location.origin + currentPage);
-            return; 
+            return;
         } else {
             cleanupMultiView();
         }
@@ -362,6 +411,7 @@ async function proceedWithRouteChange(path) {
     const isMultiView = path.startsWith('/multiview');
     const isPlayer = path.startsWith('/player');
     const isDvr = path.startsWith('/dvr');
+    const isVod = path.startsWith('/vod');
     const isActivity = path.startsWith('/activity');
     const isNotifications = path.startsWith('/notifications');
     const isSettings = path.startsWith('/settings');
@@ -369,20 +419,25 @@ async function proceedWithRouteChange(path) {
     closeMobileMenu();
 
     const isAdmin = appState.currentUser?.isAdmin;
-    
+
     // Toggle desktop and mobile nav button visibility and active state
     UIElements.tabGuide?.classList.toggle('active', isGuide);
     UIElements.mobileNavGuide?.classList.toggle('active', isGuide);
-    
+
     UIElements.tabMultiview?.classList.toggle('active', isMultiView);
     UIElements.mobileNavMultiview?.classList.toggle('active', isMultiView);
-    
+
     UIElements.tabPlayer?.classList.toggle('active', isPlayer);
     UIElements.mobileNavPlayer?.classList.toggle('active', isPlayer);
 
     // DVR tab is visible to all users to see completed recordings
     if (UIElements.tabDvr) UIElements.tabDvr.classList.toggle('active', isDvr);
     if (UIElements.mobileNavDvr) UIElements.mobileNavDvr.classList.toggle('active', isDvr);
+
+    // VOD tab is visible to all
+    if (UIElements.tabVod) UIElements.tabVod.classList.toggle('active', isVod);
+    if (UIElements.mobileNavVod) UIElements.mobileNavVod.classList.toggle('active', isVod);
+    // --- END ADD ---
 
     // Activity tab is for admins only
     if (UIElements.tabActivity) {
@@ -393,7 +448,7 @@ async function proceedWithRouteChange(path) {
         UIElements.mobileNavActivity.classList.toggle('active', isActivity && isAdmin);
         UIElements.mobileNavActivity.classList.toggle('hidden', !isAdmin);
     }
-    
+
     UIElements.tabNotifications?.classList.toggle('active', isNotifications);
     UIElements.mobileNavNotifications?.classList.toggle('active', isNotifications);
 
@@ -406,37 +461,42 @@ async function proceedWithRouteChange(path) {
         UIElements.mobileNavSettings.classList.toggle('active', isSettings && isAdmin);
         UIElements.mobileNavSettings.classList.toggle('hidden', !isAdmin);
     }
-    
+
     // Toggle page visibility
     UIElements.pageGuide.classList.toggle('hidden', !isGuide);
     UIElements.pageGuide.classList.toggle('flex', isGuide);
-    
+
     UIElements.pageMultiview.classList.toggle('hidden', !isMultiView);
     UIElements.pageMultiview.classList.toggle('flex', isMultiView);
-    
+
     UIElements.pagePlayer.classList.toggle('hidden', !isPlayer);
     UIElements.pagePlayer.classList.toggle('flex', isPlayer);
-    
+
     // Show DVR page to everyone; content inside is handled by dvr.js
-    UIElements.pageDvr.classList.toggle('hidden', !isDvr); 
+    UIElements.pageDvr.classList.toggle('hidden', !isDvr);
     UIElements.pageDvr.classList.toggle('flex', isDvr);
+
+    // Show VOD page to everyone
+    UIElements.pageVod.classList.toggle('hidden', !isVod);
+    UIElements.pageVod.classList.toggle('flex', isVod);
+    // --- END ADD ---
 
     UIElements.pageActivity.classList.toggle('hidden', !isActivity || !isAdmin);
     UIElements.pageActivity.classList.toggle('flex', isActivity && isAdmin);
-    
+
     UIElements.pageNotifications.classList.toggle('hidden', !isNotifications);
     UIElements.pageNotifications.classList.toggle('flex', isNotifications);
-    
+
     // Show settings page only to admins
     UIElements.pageSettings.classList.toggle('hidden', !isSettings || !isAdmin);
     UIElements.pageSettings.classList.toggle('flex', isSettings && isAdmin);
-    
-    const appContainer = UIElements.appContainer; 
+
+    const appContainer = UIElements.appContainer;
 
     if (isGuide) {
         if (appContainer) appContainer.classList.remove('header-collapsed');
         if (UIElements.guideContainer) UIElements.guideContainer.scrollTop = 0;
-        
+
         if (blockConfigReload) {
             console.log(`%c[DEBUG] RACE_CONDITION_FIX: Navigation to Guide tab occurred while config reload was blocked. Skipping reload.`, 'color: #fca5a5; font-weight: bold;');
             return;
@@ -447,6 +507,9 @@ async function proceedWithRouteChange(path) {
             const config = await fetchConfig();
             if (config) {
                 Object.assign(guideState.settings, config.settings || {});
+                // --- FIX: Add VOD data to the global state ---
+                //guideState.vodMovies = config.vodMovies || [];
+                //guideState.vodSeries = config.vodSeries || [];
                 finalizeGuideLoad(true);
             }
         } else {
@@ -455,14 +518,14 @@ async function proceedWithRouteChange(path) {
 
     } else {
         if (appContainer) appContainer.classList.remove('header-collapsed');
-        
+
         if (isSettings && isAdmin) {
-             if (blockConfigReload) {
+            if (blockConfigReload) {
                 console.log(`%c[DEBUG] RACE_CONDITION_FIX: Navigation to Settings tab occurred while config reload was blocked. Skipping reload.`, 'color: #fca5a5; font-weight: bold;');
-             } else {
+            } else {
                 updateUIFromSettings();
                 if (appState.currentUser?.isAdmin) refreshUserList();
-             }
+            }
         } else if (isNotifications) {
             await loadAndScheduleNotifications();
         } else if (isMultiView) {
@@ -471,6 +534,8 @@ async function proceedWithRouteChange(path) {
             initDirectPlayer();
         } else if (isDvr) { // DVR page init is now called for all users
             await initDvrPage();
+        } else if (isVod) {
+            await initVodPage();
         } else if (isActivity && isAdmin) {
             await initActivityPage();
         }
@@ -500,6 +565,7 @@ export const switchTab = (activeTab) => {
     else if (activeTab === 'multiview') newPath = '/multiview';
     else if (activeTab === 'player') newPath = '/player';
     else if (activeTab === 'dvr') newPath = '/dvr';
+    else if (activeTab === 'vod') newPath = '/vod';
     else if (activeTab === 'activity') newPath = '/activity';
     else if (activeTab === 'notifications') newPath = '/notifications';
     else newPath = '/settings';
@@ -512,32 +578,84 @@ export const switchTab = (activeTab) => {
 // MODIFIED: Add export to this function
 /**
  * NEW: Initiates a refresh of the TV Guide with new data.
+ * FIXED: Reordered operations to fix race condition - navigate first, then load data.
+ * FIXED: Set isNavigating flag to prevent navigation from triggering competing guide load.
+ * FIXED: Load guide data BEFORE navigating to ensure DOM is ready for centering.
  */
 export async function refreshGuideAfterProcessing() {
     console.log('[UI_PROCESS] Finalizing process and refreshing guide...');
-    // 1. Fetch the absolute latest config from the server
-    const config = await fetchConfig();
 
-    // 2. Update the global state
+    // 1. Close the modal first
+    closeModal(UIElements.processingStatusModal);
+
+    // 2. Fetch the absolute latest config from the server FIRST
+    const config = await fetchConfig();
+    console.log('[UI_PROCESS_DEBUG] Config fetched:', config ? 'SUCCESS' : 'NULL');
+    console.log('[UI_PROCESS_DEBUG] m3uContent exists:', !!config?.m3uContent);
+    console.log('[UI_PROCESS_DEBUG] m3uContent length:', config?.m3uContent?.length || 0);
+
+    // 3. Update the global state
     if (config) {
         Object.assign(guideState.settings, config.settings || {});
     }
 
-    // 3. Close the modal
-    closeModal(UIElements.processingStatusModal);
-
-    // 4. Force a refresh of the TV Guide page with the new data
-    // This uses the content from the latest config fetch.
+    // 4. Load guide data FIRST (this processes and stores the data in memory)
+    // Do NOT render yet - just parse and store
     if (config?.m3uContent) {
+        console.log('[UI_PROCESS_DEBUG] About to parse guide data (no render yet)...');
         await guideState.settings.timezoneOffset; // Ensure timezone is set before parsing
-        await import('./guide.js').then(module => module.handleGuideLoad(config.m3uContent, config.epgContent));
-        showNotification('Sources processed. TV Guide updated!', false, 4000);
+
+        // Parse the M3U and store in guideState (from handleGuideLoad logic)
+        const { parseM3U } = await import('./utils.js');
+        guideState.channels = parseM3U(config.m3uContent);
+        guideState.programs = config.epgContent || {};
+
+        // Store in IndexedDB
+        if (appState.db) {
+            await appState.db.transaction(['guideData'], 'readwrite').objectStore('guideData').put(guideState.channels, 'channels');
+            await appState.db.transaction(['guideData'], 'readwrite').objectStore('guideData').put(guideState.programs, 'programs');
+        }
+
+        console.log('[UI_PROCESS_DEBUG] Guide data parsed and stored. Channels:', guideState.channels.length);
+
+        // 5. NOW navigate to the guide tab
+        // Set flag to prevent competing load
+        appState.isNavigating = true;
         navigate('/tvguide');
+
+        // 6. CRITICAL: Wait for the guide page to be FULLY VISIBLE before rendering
+        // This ensures the page container is visible so DOM queries work
+        await new Promise(resolve => {
+            const checkVisible = () => {
+                const guidePage = document.getElementById('page-guide');
+
+                // Only check if the PAGE is visible, not the grid
+                // (the grid visibility is controlled by renderGuide itself)
+                if (guidePage && !guidePage.classList.contains('hidden')) {
+                    console.log('[UI_PROCESS_DEBUG] Guide page is now visible');
+                    resolve();
+                } else {
+                    requestAnimationFrame(checkVisible);
+                }
+            };
+            checkVisible();
+        });
+
+        // 7. NOW render the guide with centering using the pre-loaded data
+        console.log('[UI_PROCESS_DEBUG] About to finalize guide load with shouldCenter=true');
+        await import('./guide.js').then(module => module.finalizeGuideLoad(true));
+        console.log('[UI_PROCESS_DEBUG] Guide finalized - render complete');
+
+        // 8. Reset navigation flag
+        appState.isNavigating = false;
+
+        showNotification('Sources processed. TV Guide updated!', false, 4000);
     } else {
+        console.log('[UI_PROCESS_DEBUG] Skipping handleGuideLoad - no m3uContent');
         showNotification('Sources processed, but no guide data found.', true, 4000);
     }
 
-    // 5. Update settings page UI for source status indicators
+    // 9. Update settings page UI for source status indicators
     import('./settings.js').then(module => module.updateUIFromSettings());
 }
 
@@ -548,7 +666,7 @@ export async function refreshGuideAfterProcessing() {
 export function showProcessingModal() {
     const modal = UIElements.processingStatusModal;
     const logContainer = UIElements.processingStatusLog;
-    
+
     if (!modal || !logContainer || !UIElements.processingStatusBackgroundBtn || !UIElements.processingStatusCloseRefreshBtn || !UIElements.processingStatusRunningActions || !UIElements.processingStatusFinishedActions) {
         console.error('[UI_PROCESS] Missing processing modal elements in UIElements.');
         return;
@@ -557,12 +675,12 @@ export function showProcessingModal() {
     // Reset the modal state
     logContainer.innerHTML = '';
     isProcessingRunning = true; // Assume running when modal is first opened
-    
+
     // Hide all action buttons initially
     UIElements.processingStatusRunningActions.classList.remove('hidden');
     UIElements.processingStatusFinishedActions.classList.add('hidden');
     UIElements.processingStatusBackgroundBtn.classList.remove('hidden');
-    
+
     // 1. Setup 'Continue in the background' button
     UIElements.processingStatusBackgroundBtn.onclick = () => {
         closeModal(modal);

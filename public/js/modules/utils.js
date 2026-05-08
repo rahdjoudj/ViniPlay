@@ -43,3 +43,26 @@ export function parseM3U(data) {
     }
     return channels;
 }
+
+/**
+ * NEW: Formats a date object to a time string with a specified UTC offset.
+ * @param {Date} date - The date object to format.
+ * @param {number} offsetHours - The timezone offset in hours (e.g., -5 for EST).
+ * @returns {string} The formatted time string (e.g., "14:30").
+ */
+export function formatTimeWithOffset(date, offsetHours = 0) {
+    if (!(date instanceof Date)) {
+        date = new Date(date);
+    }
+
+    // Apply the user's desired offset directly to the input timestamp
+    // This assumes the input date is already in the correct base time (typically UTC)
+    const adjustedTime = new Date(date.getTime() + (offsetHours * 3600000));
+
+    // Use UTC methods for consistent, device-independent formatting
+    // This ensures identical results regardless of viewport size, browser, or device locale
+    const hours = adjustedTime.getUTCHours().toString().padStart(2, '0');
+    const minutes = adjustedTime.getUTCMinutes().toString().padStart(2, '0');
+
+    return `${hours}:${minutes}`;
+}

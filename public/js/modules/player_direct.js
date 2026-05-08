@@ -18,18 +18,35 @@ let currentRedirectHistoryId = null; // To track redirect streams for logging
 // --- Helper Functions ---
 
 /**
+ * Formats time in seconds to HH:MM:SS or MM:SS format
+ * @param {number} seconds - Time in seconds
+ * @returns {string} Formatted time string
+ */
+function formatTime(seconds) {
+    if (isNaN(seconds) || seconds === Infinity) return '--:--';
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+
+    if (hours > 0) {
+        return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+    return `${minutes}:${String(secs).padStart(2, '0')}`;
+}
+
+/**
  * Logs a message to the on-screen player console.
  * @param {string} message - The message to display.
  * @param {boolean} isError - If true, styles the message as an error.
  */
-function logToPlayerConsole(message, isError = false) {
+export function logToPlayerConsole(message, isError = false) {
     const consoleEl = UIElements.directPlayerConsole;
     if (!consoleEl) return;
 
     const timestamp = new Date().toLocaleTimeString();
     const logEntry = document.createElement('p');
     logEntry.innerHTML = `<span class="text-gray-500">${timestamp}:</span> <span class="${isError ? 'text-red-400' : 'text-gray-300'}">${message}</span>`;
-    
+
     consoleEl.appendChild(logEntry);
     consoleEl.scrollTop = consoleEl.scrollHeight; // Auto-scroll to the bottom
 }
@@ -92,6 +109,34 @@ function renderRecentLinks() {
     });
 }
 
+/**
+ * Detects if a URL is a video file or a live stream based on extension.
+ * Used by Direct Player to determine playback method.
+ * @param {string} url - The URL to analyze
+ * @returns {object} - { isVOD: boolean, extension: string, type: 'vod'|'stream' }
+ */
+function detectStreamType(url) {
+    const vodExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.webm', '.m4v', '.flv', '.wmv', '.mpg', '.mpeg'];
+    const streamExtensions = ['.ts', '.m3u8'];
+
+    const urlLower = url.toLowerCase();
+
+    for (const ext of vodExtensions) {
+        if (urlLower.includes(ext)) {
+            return { isVOD: true, extension: ext, type: 'vod' };
+        }
+    }
+
+    for (const ext of streamExtensions) {
+        if (urlLower.includes(ext)) {
+            return { isVOD: false, extension: ext, type: 'stream' };
+        }
+    }
+
+    // Default to stream if unknown
+    return { isVOD: false, extension: 'unknown', type: 'stream' };
+}
+
 // --- Player Lifecycle Functions ---
 
 /**
@@ -107,7 +152,7 @@ export function initDirectPlayer() {
     if (UIElements.directPlayerForm) {
         UIElements.directPlayerForm.reset();
     }
-    
+
     const savedDirectPlayState = guideState.settings.directPlayEnabled === true;
     UIElements.directPlayCheckbox.checked = savedDirectPlayState;
 
@@ -134,9 +179,9 @@ async function stopAndCleanupDirectPlayer() {
 
     // If a stream is active, explicitly tell the server to stop it
     if (currentStreamUrl) {
-         console.log(`[DEBUG] stopAndCleanupDirectPlayer: Calling stopStream() API for URL: ${currentStreamUrl}.`);
-         await stopStream(currentStreamUrl);
-         console.log('[DEBUG] stopAndCleanupDirectPlayer: stopStream() API call complete.');
+        console.log(`[DEBUG] stopAndCleanupDirectPlayer: Calling stopStream() API for URL: ${currentStreamUrl}.`);
+        await stopStream(currentStreamUrl);
+        console.log('[DEBUG] stopAndCleanupDirectPlayer: stopStream() API call complete.');
     } else {
         console.log('[DEBUG] stopAndCleanupDirectPlayer: No currentStreamUrl to stop.');
     }
@@ -144,14 +189,15 @@ async function stopAndCleanupDirectPlayer() {
     if (appState.player) {
         console.log('[DEBUG] stopAndCleanupDirectPlayer: appState.player exists. Proceeding with client-side cleanup.');
         try {
-            console.log('[DEBUG] stopAndCleanupDirectPlayer: Pausing player.');
-            appState.player.pause();
-            console.log('[DEBUG] stopAndCleanupDirectPlayer: Unloading player.');
-            appState.player.unload();
-            console.log('[DEBUG] stopAndCleanupDirectPlayer: Detaching media element.');
-            appState.player.detachMediaElement();
-            console.log('[DEBUG] stopAndCleanupDirectPlayer: Destroying player.');
-            appState.player.destroy();
+            // Check if it's an mpegts.js player instance (for live streams)
+            if (appState.player.pause && appState.player.unload && appState.player.detachMediaElement) {
+                console.log('[DEBUG] stopAndCleanupDirectPlayer: Cleaning up mpegts.js player.');
+                appState.player.pause();
+                appState.player.unload();
+                appState.player.detachMediaElement();
+                appState.player.destroy();
+            }
+            // Note: Native video cleanup is handled by clearing video.src below
         } catch (e) {
             console.error('[DEBUG] stopAndCleanupDirectPlayer: Error during local player cleanup:', e);
         } finally {
@@ -194,14 +240,22 @@ export function isDirectPlayerActive() {
 }
 
 /**
- * Initializes mpegts.js and plays the provided stream URL.
- * @param {string} url The URL of the .ts or .m3u8 stream.
+ * Main dispatcher function that detects stream type and routes to appropriate player.
+ * @param {string} url The URL of the stream or video file.
  */
 function playDirectStream(url) {
     console.log(`[DEBUG] playDirectStream: Called with URL: ${url}`);
-    
-    // First, stop any existing stream
-    stopAndCleanupDirectPlayer();
+
+    // Only stop the current stream if we're playing a different URL
+    if (currentStreamUrl && currentStreamUrl !== url) {
+        console.log(`[DEBUG] playDirectStream: Stopping previous stream (different URL).`);
+        stopAndCleanupDirectPlayer();
+    } else if (!currentStreamUrl) {
+        console.log(`[DEBUG] playDirectStream: No active stream to stop.`);
+        stopAndCleanupDirectPlayer();
+    } else {
+        console.log(`[DEBUG] playDirectStream: Same URL already playing, not stopping.`);
+    }
 
     const consoleEl = UIElements.directPlayerConsole;
     if (consoleEl) {
@@ -210,12 +264,224 @@ function playDirectStream(url) {
     UIElements.directPlayerConsoleContainer.classList.remove('hidden');
     logToPlayerConsole(`Attempting to play: ${url}`);
 
+    // Detect the stream type
+    const streamType = detectStreamType(url);
+    logToPlayerConsole(`Detected format: ${streamType.extension} (Type: ${streamType.type})`);
+    console.log(`[DEBUG] playDirectStream: Detected stream type:`, streamType);
+
+    // Set the current stream URL for tracking
+    currentStreamUrl = url;
+
+    // Add to recent links
+    addRecentLink(url);
+    renderRecentLinks();
+
+    // Route to appropriate playback function
+    if (streamType.isVOD) {
+        playVODStream(url, streamType);
+    } else {
+        playLiveStream(url, streamType);
+    }
+}
+
+/**
+ * Plays a Direct Player video file (e.g., .mkv, .mp4, .avi) using either native HTML5 video or server transcoding.
+ * Note: This is NOT related to the VOD library in vod.js - this handles individual URLs pasted in Direct Player.
+ * @param {string} url The URL of the video file.
+ * @param {object} streamType The stream type object from detectStreamType.
+ */
+function playVODStream(url, streamType) {
+    console.log(`[DEBUG] playVODStream: Playing VOD file with extension ${streamType.extension}`);
+
+    const isDirectPlay = UIElements.directPlayCheckbox.checked;
+
+    if (isDirectPlay) {
+        // --- NATIVE / DIRECT PLAY Logic ---
+        logToPlayerConsole('Direct Play is ON. Using native HTML5 <video> element.');
+        console.log('[DEBUG] playVODStream: Using native HTML5 video element for direct playback.');
+
+        // Start activity logging for redirect streams
+        if (currentRedirectHistoryId) {
+            stopRedirectStream(currentRedirectHistoryId);
+            currentRedirectHistoryId = null;
+        }
+        startRedirectStream(url, null, 'Direct Player Video', null)
+            .then(historyId => {
+                if (historyId) {
+                    currentRedirectHistoryId = historyId;
+                }
+            });
+
+        // Show player container
+        UIElements.directPlayerContainer.classList.remove('hidden');
+        UIElements.directStopBtn.classList.remove('hidden');
+        UIElements.directPlayBtn.classList.add('hidden');
+
+        // Set the video source directly
+        UIElements.directVideoElement.src = url;
+        UIElements.directVideoElement.load();
+
+        // Set volume from localStorage
+        UIElements.directVideoElement.volume = parseFloat(localStorage.getItem('iptvPlayerVolume') || 0.5);
+
+        // Try to play
+        UIElements.directVideoElement.play().then(() => {
+            logToPlayerConsole(`Direct Player: Video loaded successfully for: ${url}`);
+            console.log('[DEBUG] playVODStream: Native playback started.');
+        }).catch((err) => {
+            const errorMsg = `Cannot play ${streamType.extension} files in Direct Play mode. Browser does not support this format natively. Try unchecking Direct Play to use server transcoding.`;
+            console.error('[DEBUG] playVODStream: Native playback error:', err);
+            logToPlayerConsole(errorMsg, true);
+            showNotification(errorMsg, true);
+            stopAndCleanupDirectPlayer();
+        });
+
+    } else {
+        // --- PROFILE / SERVER TRANSCODING Logic ---
+        logToPlayerConsole('Direct Play is OFF. Using server transcoding via /stream endpoint.');
+        console.log('[DEBUG] playVODStream: Using server /stream endpoint for transcoding.');
+
+        const settings = guideState.settings;
+        const userAgentId = settings.activeUserAgentId;
+
+        // Auto-select the best fMP4 profile for Direct Player video files based on hardware
+        // This is hidden from users for simplicity
+        let profileId;
+        if (guideState.hardware?.nvidia) {
+            profileId = 'ffmpeg-fmp4-nvidia';
+            console.log('[DEBUG] playVODStream: Auto-selected NVIDIA fMP4 profile for Direct Player video.');
+        } else {
+            profileId = 'ffmpeg-fmp4';
+            console.log('[DEBUG] playVODStream: Auto-selected CPU fMP4 profile for Direct Player video.');
+        }
+
+        const profile = (settings.streamProfiles || []).find(p => p.id === profileId);
+
+        if (!profileId || !userAgentId || !profile) {
+            const errorMsg = "Direct Player profile not available or user agent not set. Please check settings.";
+            logToPlayerConsole(errorMsg, true);
+            showNotification(errorMsg, true);
+            console.error(`[DEBUG] playVODStream: ${errorMsg}`);
+            return;
+        }
+
+        logToPlayerConsole(`Using Profile: ${profile.name} (auto-selected for Direct Player)`);
+
+        // For the direct player with Direct Play OFF, ALWAYS use /stream endpoint
+        // This allows the server to handle transcoding and avoids CORS issues
+        const streamUrlToPlay = `/stream?url=${encodeURIComponent(url)}&profileId=${profileId}&userAgentId=${userAgentId}`;
+
+        console.log(`[DEBUG] playVODStream: Stream URL: ${streamUrlToPlay}`);
+        logToPlayerConsole(`Stream URL: ${streamUrlToPlay}`);
+
+        // Use native HTML5 video for fMP4 progressive streams
+        // This is simpler and works better than Shaka Player for progressive downloads
+        try {
+            const video = UIElements.directVideoElement;
+
+            console.log('[DEBUG] playVODStream: Using native HTML5 video for fMP4 stream.');
+            logToPlayerConsole('Using native HTML5 video for playback.');
+
+            // Show player container
+            UIElements.directPlayerContainer.classList.remove('hidden');
+            UIElements.directStopBtn.classList.remove('hidden');
+            UIElements.directPlayBtn.classList.add('hidden');
+
+            // Set volume
+            video.volume = parseFloat(localStorage.getItem('iptvPlayerVolume') || 0.5);
+
+            // Error handling
+            video.addEventListener('error', (e) => {
+                const error = video.error;
+                let errorMsg = 'Failed to load video.';
+                if (error) {
+                    switch (error.code) {
+                        case error.MEDIA_ERR_ABORTED:
+                            errorMsg = 'Video load aborted.';
+                            break;
+                        case error.MEDIA_ERR_NETWORK:
+                            errorMsg = 'Network error while loading video.';
+                            break;
+                        case error.MEDIA_ERR_DECODE:
+                            errorMsg = 'Video decoding failed.';
+                            break;
+                        case error.MEDIA_ERR_SRC_NOT_SUPPORTED:
+                            errorMsg = 'Video format not supported.';
+                            break;
+                    }
+                }
+                console.error('[DEBUG] playVODStream: Video error:', error);
+                logToPlayerConsole(errorMsg, true);
+                showNotification(errorMsg, true);
+                stopAndCleanupDirectPlayer();
+            }, { once: true });
+
+            // Wait for metadata to be loaded before starting playback
+            video.addEventListener('loadedmetadata', () => {
+                console.log('[DEBUG] playVODStream: Metadata loaded. Video ready.');
+                logToPlayerConsole('Video loaded. Starting playback...');
+
+                // Start playback
+                video.play().then(() => {
+                    console.log('[DEBUG] playVODStream: Playback started successfully.');
+                    logToPlayerConsole('Playback started successfully.');
+
+                    // Start statistics logging
+                    if (statisticsInterval) {
+                        clearInterval(statisticsInterval);
+                    }
+                    statisticsInterval = setInterval(() => {
+                        if (video.buffered.length > 0 && !video.paused) {
+                            const bufferEnd = video.buffered.end(0);
+                            const buffer = bufferEnd - video.currentTime;
+                            const currentTime = formatTime(video.currentTime);
+                            const duration = formatTime(video.duration);
+
+                            const logMsg = `Time: ${currentTime}/${duration} --- Buffer: ${buffer.toFixed(2)}s --- Resolution: ${video.videoWidth}x${video.videoHeight}`;
+                            logToPlayerConsole(logMsg);
+                        }
+                    }, 2000);
+
+                }).catch((error) => {
+                    if (error.name === 'AbortError') {
+                        console.warn('[DEBUG] playVODStream: Playback was aborted.');
+                        return;
+                    }
+                    const errorMsg = `Failed to start playback: ${error.message}`;
+                    console.error('[DEBUG] playVODStream: Play error:', error);
+                    logToPlayerConsole(errorMsg, true);
+                    showNotification(errorMsg, true);
+                    stopAndCleanupDirectPlayer();
+                });
+            }, { once: true });
+
+            // Set the video source (this will trigger loading)
+            video.src = streamUrlToPlay;
+
+        } catch (e) {
+            const errorMsg = `Failed to initialize video player: ${e.message}`;
+            console.error('[DEBUG] playVODStream: Critical error:', e);
+            logToPlayerConsole(errorMsg, true);
+            showNotification(errorMsg, true);
+            stopAndCleanupDirectPlayer();
+        }
+    }
+}
+
+/**
+ * Plays a live stream (e.g., .ts, .m3u8) using mpegts.js.
+ * @param {string} url The URL of the live stream.
+ * @param {object} streamType The detected stream type object.
+ */
+function playLiveStream(url, streamType) {
+    console.log(`[DEBUG] playLiveStream: Playing live stream with extension ${streamType.extension}`);
+
     const isDirectPlay = UIElements.directPlayCheckbox.checked;
     let streamUrlToPlay = url;
 
     if (!isDirectPlay) {
         logToPlayerConsole('Direct Play is OFF. Using server proxy.');
-        
+
         const settings = guideState.settings;
         const profileIdToUse = settings.activeStreamProfileId;
         const userAgentId = settings.activeUserAgentId;
@@ -233,7 +499,8 @@ function playDirectStream(url) {
 
     } else {
         logToPlayerConsole('Direct Play is ON. Connecting directly to stream.');
-        // --- Activity Logging for Redirect Streams ---
+
+        // Activity Logging for Redirect Streams
         if (currentRedirectHistoryId) {
             stopRedirectStream(currentRedirectHistoryId);
             currentRedirectHistoryId = null;
@@ -250,18 +517,11 @@ function playDirectStream(url) {
                     currentRedirectHistoryId = historyId;
                 }
             });
-        // --- End Activity Logging ---
     }
-    
-    // Set the current stream URL for tracking and stopping purposes.
-    currentStreamUrl = url;
-
-    addRecentLink(url);
-    renderRecentLinks();
 
     if (mpegts.isSupported()) {
         try {
-            console.log(`[DEBUG] playDirectStream: Creating new mpegts.js player for URL: ${streamUrlToPlay}`);
+            console.log(`[DEBUG] playLiveStream: Creating new mpegts.js player for URL: ${streamUrlToPlay}`);
 
             const mpegtsConfig = {
                 enableStashBuffer: true,
@@ -275,23 +535,23 @@ function playDirectStream(url) {
                 isLive: true,
                 url: streamUrlToPlay
             }, mpegtsConfig);
-            
+
             appState.player = newPlayer;
-            console.log('[DEBUG] playDirectStream: New player instance created and assigned to appState.player.');
+            console.log('[DEBUG] playLiveStream: New player instance created and assigned to appState.player.');
 
             UIElements.directPlayerContainer.classList.remove('hidden');
             UIElements.directStopBtn.classList.remove('hidden');
             UIElements.directPlayBtn.classList.add('hidden');
-            
-            console.log('[DEBUG] playDirectStream: Attaching media element.');
+
+            console.log('[DEBUG] playLiveStream: Attaching media element.');
             appState.player.attachMediaElement(UIElements.directVideoElement);
-            
+
             appState.player.on(mpegts.Events.ERROR, (errorType, errorDetail) => {
                 console.error('[DirectPlayer] MPEGTS Error:', errorType, errorDetail);
                 logToPlayerConsole(`Error: ${errorType} - ${errorDetail}`, true);
                 stopAndCleanupDirectPlayer();
             });
-            
+
             if (statisticsInterval) {
                 clearInterval(statisticsInterval);
             }
@@ -307,17 +567,17 @@ function playDirectStream(url) {
                 }
             }, 2000);
 
-            console.log('[DEBUG] playDirectStream: Calling player.load().');
+            console.log('[DEBUG] playLiveStream: Calling player.load().');
             appState.player.load();
-            
-            console.log('[DEBUG] playDirectStream: Calling player.play().');
+
+            console.log('[DEBUG] playLiveStream: Calling player.play().');
             appState.player.play().catch((err) => {
                 if (err.name === 'AbortError') {
-                    console.warn('[DEBUG] playDirectStream: Playback was aborted. This is expected if the user clicks stop or navigates away very quickly.');
+                    console.warn('[DEBUG] playLiveStream: Playback was aborted. This is expected if the user clicks stop or navigates away very quickly.');
                     return;
                 }
                 const errorMsg = `Could not play the stream. Please check the URL and console log for details.`;
-                console.error("[DEBUG] playDirectStream: player.play() caught an error:", err);
+                console.error("[DEBUG] playLiveStream: player.play() caught an error:", err);
                 logToPlayerConsole(errorMsg, true);
                 showNotification(errorMsg, true);
                 stopAndCleanupDirectPlayer();
@@ -326,7 +586,7 @@ function playDirectStream(url) {
 
         } catch (e) {
             const errorMsg = 'Failed to create player instance. Check stream URL.';
-            console.error('[DEBUG] playDirectStream: Critical error during player creation:', e);
+            console.error('[DEBUG] playLiveStream: Critical error during player creation:', e);
             logToPlayerConsole(`${errorMsg} Details: ${e.message}`, true);
             stopAndCleanupDirectPlayer();
         }
@@ -353,7 +613,7 @@ export function setupDirectPlayerEventListeners() {
     });
 
     UIElements.directStopBtn.addEventListener('click', stopAndCleanupDirectPlayer);
-    
+
     UIElements.directPlayCheckbox.addEventListener('change', () => {
         const isEnabled = UIElements.directPlayCheckbox.checked;
         guideState.settings.directPlayEnabled = isEnabled;
@@ -365,7 +625,7 @@ export function setupDirectPlayerEventListeners() {
     UIElements.recentLinksTbody.addEventListener('click', (e) => {
         const replayLink = e.target.closest('.replay-link');
         const deleteBtn = e.target.closest('.delete-recent-link-btn');
-        
+
         if (replayLink) {
             e.preventDefault();
             const url = replayLink.dataset.url;

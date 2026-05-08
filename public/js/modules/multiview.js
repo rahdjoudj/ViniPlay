@@ -21,6 +21,17 @@ const MAX_PLAYERS = 9;
 const redirectHistoryIds = new Map(); // To track redirect streams for logging
 
 /**
+ * Detects if a URL is a VOD file by checking for file extensions.
+ * @param {string} url - The stream URL to check
+ * @returns {boolean} True if URL appears to be a VOD file
+ */
+function isVODFile(url) {
+    const vodExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.m4v', '.flv', '.wmv', '.mpg', '.mpeg', '.webm'];
+    const lowerUrl = url.toLowerCase();
+    return vodExtensions.some(ext => lowerUrl.includes(ext));
+}
+
+/**
  * NEW: A less aggressive cleanup function specifically for when the tab is hidden.
  * It pauses players and stops server streams without destroying the player instances,
  * which can cause race conditions with the browser's media suspension.
@@ -61,7 +72,7 @@ async function pauseAndClearAllPlayers() {
             console.warn(`[MultiView] Tab Hide: Error pausing player for widget ${widgetId}. It might already be detached.`, e);
         }
     }
-    
+
     // Wait for all server stop requests to be sent
     await Promise.all(stopPromises);
     console.log('[MultiView] Tab Hide: All server streams have been requested to stop.');
@@ -84,7 +95,7 @@ const handleVisibilityChange = async () => {
         if (isMultiViewActive()) {
             console.log('[MultiView] Tab hidden. Pausing all streams and cleaning up UI.');
             // Use the new, safer cleanup for tab switching.
-            await pauseAndClearAllPlayers(); 
+            await pauseAndClearAllPlayers();
         }
     } else {
         if (lastLayoutBeforeHide) {
@@ -246,6 +257,70 @@ function setupMultiViewEventListeners() {
     UIElements.saveLayoutForm.addEventListener('submit', saveLayout);
     UIElements.saveLayoutCancelBtn.addEventListener('click', () => closeModal(UIElements.saveLayoutModal));
 
+    // --- NEW: Custom URL Tab Switching ---
+    UIElements.multiviewSourceListBtn?.addEventListener('click', () => {
+        UIElements.multiviewSourceListBtn.classList.add('bg-gray-700', 'text-white', 'font-medium');
+        UIElements.multiviewSourceListBtn.classList.remove('text-gray-300');
+        UIElements.multiviewSourceCustomBtn.classList.remove('bg-gray-700', 'text-white', 'font-medium');
+        UIElements.multiviewSourceCustomBtn.classList.add('text-gray-300');
+
+        // Show channel list elements
+        UIElements.channelSelectorList.classList.remove('hidden');
+        UIElements.channelSelectorSearch.classList.remove('hidden');
+        // Show the filter dropdown container (parent of the select and h3)
+        const filterContainer = UIElements.multiviewChannelFilter.closest('.flex.justify-between');
+        if (filterContainer) filterContainer.classList.remove('hidden');
+
+        // Hide custom URL container
+        UIElements.multiviewCustomUrlContainer.classList.add('hidden');
+    });
+
+    UIElements.multiviewSourceCustomBtn?.addEventListener('click', () => {
+        UIElements.multiviewSourceCustomBtn.classList.add('bg-gray-700', 'text-white', 'font-medium');
+        UIElements.multiviewSourceCustomBtn.classList.remove('text-gray-300');
+        UIElements.multiviewSourceListBtn.classList.remove('bg-gray-700', 'text-white', 'font-medium');
+        UIElements.multiviewSourceListBtn.classList.add('text-gray-300');
+
+        // Hide channel list elements
+        UIElements.channelSelectorList.classList.add('hidden');
+        UIElements.channelSelectorSearch.classList.add('hidden');
+        // Hide the filter dropdown container (parent of the select and h3)
+        const filterContainer = UIElements.multiviewChannelFilter.closest('.flex.justify-between');
+        if (filterContainer) filterContainer.classList.add('hidden');
+
+        // Show custom URL container
+        UIElements.multiviewCustomUrlContainer.classList.remove('hidden');
+    });
+
+    // --- NEW: Handle custom URL play button ---
+    UIElements.multiviewCustomUrlPlayBtn?.addEventListener('click', () => {
+        const url = UIElements.multiviewCustomUrlInput.value.trim();
+        const name = UIElements.multiviewCustomNameInput.value.trim() || 'Custom Stream';
+
+        if (!url) {
+            showNotification('Please enter a stream URL', true);
+            return;
+        }
+
+        // Create a temporary channel object
+        const customChannel = {
+            id: `custom-${Date.now()}`,
+            name: name,
+            url: url,
+            logo: 'https://placehold.co/40x40/1f2937/d1d5db?text=URL'
+        };
+
+        // Call the callback (same as clicking a channel from list)
+        if (channelSelectorCallback) {
+            channelSelectorCallback(customChannel);
+            closeModal(UIElements.multiviewChannelSelectorModal);
+
+            // Clear inputs
+            UIElements.multiviewCustomUrlInput.value = '';
+            UIElements.multiviewCustomNameInput.value = '';
+        }
+    });
+
     // --- NEW: Immersive Mode Event Listeners ---
     const immersiveToggle = document.getElementById('immersive-mode-toggle');
     if (immersiveToggle) {
@@ -296,6 +371,7 @@ function addPlayerWidget(channel = null, layout = {}) {
             <span class="player-header-title">No Channel</span>
             <div class="player-controls">
                 <button class="select-channel-btn" title="Select Channel">${ICONS.selectChannel}</button>
+                <button class="play-pause-btn" title="Play/Pause">${ICONS.pause}</button>
                 <button class="mute-btn" title="Mute">${ICONS.unmute}</button>
                 <input type="range" min="0" max="1" step="0.05" value="0.5" class="volume-slider">
                 <button class="fullscreen-btn" title="Fullscreen">${ICONS.fullscreen}</button>
@@ -319,7 +395,7 @@ function addPlayerWidget(channel = null, layout = {}) {
         h: layout.h || 4,
         x: layout.x,
         y: layout.y
-    }); 
+    });
 
     const widgetContentEl = newWidgetEl.querySelector('.grid-stack-item-content');
     if (widgetContentEl) {
@@ -347,7 +423,7 @@ async function removeLastPlayer() {
         if (lastItem) {
             const playerPlaceholder = lastItem.querySelector('.player-placeholder');
             const widgetId = playerPlaceholder ? playerPlaceholder.id : lastItem.gridstackNode.id;
-            
+
             await stopAndCleanupPlayer(widgetId);
             grid.removeWidget(lastItem);
             console.log(`[MultiView] Removed last player: ${widgetId}`);
@@ -400,18 +476,18 @@ function applyPresetLayout(layoutName) {
             }
         } else if (layoutName === '2x2') {
             layout = [
-                {x: 0, y: 0, w: 6, h: 5}, {x: 6, y: 0, w: 6, h: 5},
-                {x: 0, y: 5, w: 6, h: 5}, {x: 6, y: 5, w: 6, h: 5}
+                { x: 0, y: 0, w: 6, h: 5 }, { x: 6, y: 0, w: 6, h: 5 },
+                { x: 0, y: 5, w: 6, h: 5 }, { x: 6, y: 5, w: 6, h: 5 }
             ];
         } else if (layoutName === '1x3') {
-             const largeHeight = 9;
-             const smallHeight = 3;
-             layout = [
+            const largeHeight = 9;
+            const smallHeight = 3;
+            layout = [
                 { x: 0, y: 0, w: 8, h: largeHeight },
                 { x: 8, y: 0, w: 4, h: smallHeight },
                 { x: 8, y: smallHeight, w: 4, h: smallHeight },
                 { x: 8, y: smallHeight * 2, w: 4, h: smallHeight }
-             ];
+            ];
         }
 
         grid.batchUpdate();
@@ -471,12 +547,32 @@ function attachWidgetEventListeners(widgetContentEl, widgetId) {
             grid.removeWidget(gridStackItem);
         }
     });
-    
+
     const muteBtn = widgetContentEl.querySelector('.mute-btn');
     muteBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         videoEl.muted = !videoEl.muted;
         muteBtn.innerHTML = videoEl.muted ? ICONS.mute : ICONS.unmute;
+    });
+
+    const playPauseBtn = widgetContentEl.querySelector('.play-pause-btn');
+    playPauseBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (videoEl.paused) {
+            videoEl.play();
+            playPauseBtn.innerHTML = ICONS.pause;
+        } else {
+            videoEl.pause();
+            playPauseBtn.innerHTML = ICONS.play;
+        }
+    });
+
+    // Update play/pause button icon based on video state
+    videoEl.addEventListener('play', () => {
+        playPauseBtn.innerHTML = ICONS.pause;
+    });
+    videoEl.addEventListener('pause', () => {
+        playPauseBtn.innerHTML = ICONS.play;
     });
 
     widgetContentEl.querySelector('.volume-slider').addEventListener('input', (e) => {
@@ -509,7 +605,7 @@ function setActivePlayer(widgetId) {
 
     const oldActivePlaceholder = document.getElementById(activePlayerId);
     const oldActiveWidgetContent = oldActivePlaceholder ? oldActivePlaceholder.closest('.grid-stack-item-content') : null;
-    
+
     if (oldActiveWidgetContent) {
         oldActiveWidgetContent.classList.remove('active-player');
         const oldVideo = oldActiveWidgetContent.querySelector('video');
@@ -517,7 +613,7 @@ function setActivePlayer(widgetId) {
         const oldMuteBtn = oldActiveWidgetContent.querySelector('.mute-btn');
         if (oldMuteBtn) oldMuteBtn.innerHTML = ICONS.mute;
     }
-    
+
     const newActivePlaceholder = document.getElementById(widgetId);
     const newActiveWidgetContent = newActivePlaceholder ? newActivePlaceholder.closest('.grid-stack-item-content') : null;
 
@@ -563,69 +659,121 @@ async function playChannelInWidget(widgetId, channel, gridstackItemContentEl) {
     }
 
     const settings = guideState.settings;
-    const profileIdToUse = settings.activeStreamProfileId;
     const userAgentId = settings.activeUserAgentId;
-    
-    console.log(`[MultiView] Using active stream profile from settings: ${profileIdToUse}`);
 
-    const profile = (settings.streamProfiles || []).find(p => p.id === profileIdToUse);
-    if (!profile) {
-        showNotification("Active stream profile not found in settings.", true);
-        return;
-    }
+    // NEW: Detect if this is a VOD file
+    const isVOD = isVODFile(channel.url);
+    console.log(`[MultiView] URL type for ${widgetId}: ${isVOD ? 'VOD file' : 'Live stream'}`);
 
-    const streamUrlToPlay = profile.command === 'redirect' 
-        ? channel.url 
-        : `/stream?url=${encodeURIComponent(channel.url)}&profileId=${profileIdToUse}&userAgentId=${userAgentId}`;
-    
-    console.log(`[MultiView] Final stream URL for widget ${widgetId}: ${streamUrlToPlay}`);
+    let profileIdToUse;
+    let streamUrlToPlay;
+    let useNativeVideo = false;
 
-    if (profile.command === 'redirect') {
-        const historyId = await startRedirectStream(channel.url, channel.id, channel.name, channel.logo);
-        if (historyId) {
-            redirectHistoryIds.set(widgetId, historyId);
+    if (isVOD) {
+        // For VOD files, auto-select fMP4 profile (same as Direct Player)
+        const hasNVIDIA = settings.hasNvidiaGpu;
+        profileIdToUse = hasNVIDIA ? 'ffmpeg-fmp4-nvidia' : 'ffmpeg-fmp4';
+        console.log(`[MultiView] Auto-selected ${hasNVIDIA ? 'NVIDIA' : 'CPU'} fMP4 profile for VOD`);
+
+        streamUrlToPlay = `/stream?url=${encodeURIComponent(channel.url)}&profileId=${profileIdToUse}&userAgentId=${userAgentId}`;
+        useNativeVideo = true;
+    } else {
+        // For live streams, use existing logic
+        profileIdToUse = settings.activeStreamProfileId;
+        const profile = (settings.streamProfiles || []).find(p => p.id === profileIdToUse);
+
+        if (!profile) {
+            showNotification("Active stream profile not found in settings.", true);
+            return;
+        }
+
+        streamUrlToPlay = profile.command === 'redirect'
+            ? channel.url
+            : `/stream?url=${encodeURIComponent(channel.url)}&profileId=${profileIdToUse}&userAgentId=${userAgentId}`;
+
+        if (profile.command === 'redirect') {
+            const historyId = await startRedirectStream(channel.url, channel.id, channel.name, channel.logo);
+            if (historyId) {
+                redirectHistoryIds.set(widgetId, historyId);
+            }
         }
     }
 
-    if (mpegts.isSupported()) {
-        const mpegtsConfig = {
-            enableStashBuffer: true,
-            stashInitialSize: 4096,
-            liveBufferLatency: 2.0,
-        };
-        
-        const player = mpegts.createPlayer({
-            type: 'mse',
-            isLive: true,
-            url: streamUrlToPlay
-        }, mpegtsConfig);
+    console.log(`[MultiView] Final stream URL for widget ${widgetId}: ${streamUrlToPlay}`);
 
-        player.on(mpegts.Events.ERROR, (errorType, errorDetail) => {
-            console.error(`[MultiView] MPEGTS Player Error for ${widgetId}:`, errorType, errorDetail);
+    // NEW: Use native video for VOD, mpegts.js for live
+    if (useNativeVideo) {
+        console.log(`[MultiView] Using native HTML5 video for VOD file`);
+
+        videoEl.src = streamUrlToPlay;
+
+        videoEl.addEventListener('loadedmetadata', () => {
+            console.log(`[MultiView] VOD metadata loaded for ${widgetId}`);
+        }, { once: true });
+
+        videoEl.addEventListener('error', (e) => {
+            console.error(`[MultiView] Native video error for ${widgetId}:`, e);
             if (!document.hidden) {
-                showNotification(`Could not play stream: ${channel.name}`, true);
+                showNotification(`Could not play file: ${channel.name}`, true);
             }
             stopAndCleanupPlayer(widgetId, true);
-        });
-        
-        players.set(widgetId, player);
-        player.attachMediaElement(videoEl);
-        player.load();
-        
+        }, { once: true });
+
         try {
-            await player.play();
+            await videoEl.play();
             setActivePlayer(widgetId);
+            console.log(`[MultiView] VOD playback started for ${widgetId}`);
         } catch (err) {
-            if (err.name !== 'AbortError') { // AbortError is expected if we stop it quickly
-                 console.error(`[MultiView] player.play() caught an error for ${widgetId}:`, err);
+            if (err.name !== 'AbortError') {
+                console.error(`[MultiView] VOD playback error for ${widgetId}:`, err);
                 if (!document.hidden) {
-                    showNotification(`Could not play stream: ${channel.name}`, true);
+                    showNotification(`Could not play file: ${channel.name}`, true);
                 }
                 stopAndCleanupPlayer(widgetId, true);
             }
         }
     } else {
-        showNotification('Your browser does not support Media Source Extensions (MSE).', true);
+        // Existing mpegts.js logic for live streams
+        if (mpegts.isSupported()) {
+            const mpegtsConfig = {
+                enableStashBuffer: true,
+                stashInitialSize: 4096,
+                liveBufferLatency: 2.0,
+            };
+
+            const player = mpegts.createPlayer({
+                type: 'mse',
+                isLive: true,
+                url: streamUrlToPlay
+            }, mpegtsConfig);
+
+            player.on(mpegts.Events.ERROR, (errorType, errorDetail) => {
+                console.error(`[MultiView] MPEGTS Player Error for ${widgetId}:`, errorType, errorDetail);
+                if (!document.hidden) {
+                    showNotification(`Could not play stream: ${channel.name}`, true);
+                }
+                stopAndCleanupPlayer(widgetId, true);
+            });
+
+            players.set(widgetId, player);
+            player.attachMediaElement(videoEl);
+            player.load();
+
+            try {
+                await player.play();
+                setActivePlayer(widgetId);
+            } catch (err) {
+                if (err.name !== 'AbortError') { // AbortError is expected if we stop it quickly
+                    console.error(`[MultiView] player.play() caught an error for ${widgetId}:`, err);
+                    if (!document.hidden) {
+                        showNotification(`Could not play stream: ${channel.name}`, true);
+                    }
+                    stopAndCleanupPlayer(widgetId, true);
+                }
+            }
+        } else {
+            showNotification('Your browser does not support Media Source Extensions (MSE).', true);
+        }
     }
 }
 /**
@@ -651,7 +799,7 @@ async function stopAndCleanupPlayer(widgetId, resetUI = true) {
     if (players.has(widgetId)) {
         const player = players.get(widgetId);
         players.delete(widgetId); // Immediately remove from map
-        
+
         // This is a fire-and-forget cleanup. We don't wait for it.
         // This prevents blocking when the browser is slow to destroy the player.
         Promise.resolve().then(() => {
@@ -662,12 +810,12 @@ async function stopAndCleanupPlayer(widgetId, resetUI = true) {
                 player.destroy();
                 console.log(`[MultiView] Client-side player for widget ${widgetId} destroyed.`);
             } catch (e) {
-                 // Errors here are common if the player is already in a bad state. We can ignore them.
-                 console.warn(`[MultiView] Non-critical error during player cleanup for widget ${widgetId}:`, e.message);
+                // Errors here are common if the player is already in a bad state. We can ignore them.
+                console.warn(`[MultiView] Non-critical error during player cleanup for widget ${widgetId}:`, e.message);
             }
         });
     }
-    
+
     // Wait for server-side cleanup to complete
     await Promise.all(stopPromises);
 
@@ -688,7 +836,7 @@ async function stopAndCleanupPlayer(widgetId, resetUI = true) {
                 playerPlaceholderEl.dataset.channelId = '';
             }
             const titleEl = widgetContentEl.querySelector('.player-header-title');
-            if(titleEl) titleEl.textContent = 'No Channel';
+            if (titleEl) titleEl.textContent = 'No Channel';
         }
     }
 }
@@ -698,11 +846,16 @@ async function stopAndCleanupPlayer(widgetId, resetUI = true) {
  * Populates the channel selector modal.
  */
 export function populateChannelSelector() {
+    // NEW: Reset to "From List" tab when opening modal
+    if (UIElements.multiviewSourceListBtn) {
+        UIElements.multiviewSourceListBtn.click();
+    }
+
     const listEl = UIElements.channelSelectorList;
     const filter = UIElements.multiviewChannelFilter.value;
     const searchTerm = UIElements.channelSelectorSearch.value.trim().toLowerCase();
     if (!listEl) return;
-    
+
     let channelsToDisplay = [];
 
     if (filter === 'favorites') {
@@ -714,14 +867,14 @@ export function populateChannelSelector() {
     } else {
         channelsToDisplay = [...guideState.channels];
     }
-    
+
     if (searchTerm) {
-        channelsToDisplay = channelsToDisplay.filter(c => 
-            (c.displayName || c.name).toLowerCase().includes(searchTerm) || 
+        channelsToDisplay = channelsToDisplay.filter(c =>
+            (c.displayName || c.name).toLowerCase().includes(searchTerm) ||
             (c.group && c.group.toLowerCase().includes(searchTerm))
         );
     }
-    
+
     if (channelsToDisplay.length === 0) {
         listEl.innerHTML = `<p class="text-center text-gray-500 p-4">No channels found.</p>`;
         return;
@@ -832,7 +985,7 @@ function loadSelectedLayout() {
         showNotification('Selected layout not found.', true);
         return;
     }
-    
+
     showConfirm(
         `Load '${layout.name}'?`,
         "This will stop all current streams and load the selected layout. Are you sure?",
@@ -861,7 +1014,7 @@ async function deleteLayout() {
         showNotification('Please select a layout to delete.', true);
         return;
     }
-    
+
     showConfirm('Delete Layout?', 'Are you sure you want to delete this saved layout?', async () => {
         const res = await apiFetch(`/api/multiview/layouts/${layoutId}`, { method: 'DELETE' });
         if (res && res.ok) {
