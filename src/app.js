@@ -71,11 +71,11 @@ if (!sessionSecret) {
   }
 }
 
-import { SessionStore } from './db/session-store.js';
+const SQLiteStore = require('connect-sqlite3')(session);
 
 app.use(
   session({
-    store: new SessionStore(),
+    store: new SQLiteStore({ db: 'viniplay.db', dir: DATA_DIR, table: 'http_sessions' }),
     secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
