@@ -15,7 +15,7 @@ const multer = require('multer');
 const bodyParser = require('body-parser');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
-const sqlite3 = require('sqlite3').verbose();
+const sqlite3 = require('./src/db/compat.cjs');
 let SQLiteStore; // Lazy-init inside isMainModule guard, avoids requiring connect-sqlite3 when loaded as module
 const xmlJS = require('xml-js');
 const zlib = require('zlib');
