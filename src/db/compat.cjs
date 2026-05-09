@@ -94,6 +94,51 @@ function CompatDatabase(path, callback) {
     db.exec(sql);
   };
 
+  // --- prepare(sql) — returns a Statement-like object with run/get/all ---
+  this.prepare = function (sql) {
+    let stmt;
+    try { stmt = db.prepare(sql); } catch (e) { stmt = null; }
+    return {
+      run: function (...args) {
+        let cb;
+        const params = args.filter(a => typeof a !== 'function');
+        if (typeof args[args.length - 1] === 'function') cb = args[args.length - 1];
+        try {
+          if (!stmt) throw new Error('Invalid statement');
+          const result = stmt.run(...params);
+          if (cb) cb.call({ lastID: result.lastInsertRowid, changes: result.changes }, null);
+        } catch (err) {
+          if (cb) cb(err);
+        }
+      },
+      get: function (...args) {
+        let cb;
+        const params = args.filter(a => typeof a !== 'function');
+        if (typeof args[args.length - 1] === 'function') cb = args[args.length - 1];
+        try {
+          if (!stmt) throw new Error('Invalid statement');
+          const row = stmt.get(...params);
+          if (cb) cb(null, row);
+        } catch (err) {
+          if (cb) cb(err);
+        }
+      },
+      all: function (...args) {
+        let cb;
+        const params = args.filter(a => typeof a !== 'function');
+        if (typeof args[args.length - 1] === 'function') cb = args[args.length - 1];
+        try {
+          if (!stmt) throw new Error('Invalid statement');
+          const rows = stmt.all(...params);
+          if (cb) cb(null, rows);
+        } catch (err) {
+          if (cb) cb(err);
+        }
+      },
+      finalize: () => {},
+    };
+  };
+
   // --- close() ---
   this.close = function () {
     db.close();
