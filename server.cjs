@@ -4842,16 +4842,27 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
 
     console.log(`[IMAGE_PROXY] Fetching and caching image: ${imageUrl}`);
 
-    // Determine protocol (http or https)
-    const protocol = imageUrl.startsWith('https') ? https : http;
-
-    protocol.get(imageUrl, (imageRes) => {
-        // Check if response is an image
-        const contentType = imageRes.headers['content-type'];
-        if (!contentType || !contentType.startsWith('image/')) {
-            console.error(`[IMAGE_PROXY] Invalid content type: ${contentType}`);
-            return res.status(400).send('URL does not point to an image');
+    function fetchImage(targetUrl, redirects = 0) {
+        if (redirects > 5) {
+            return res.status(400).send('Too many redirects');
         }
+
+        const fetchProtocol = targetUrl.startsWith('https') ? https : http;
+
+        fetchProtocol.get(targetUrl, (imageRes) => {
+            // Follow redirects
+            if ([301, 302, 307, 308].includes(imageRes.statusCode)) {
+                const location = imageRes.headers.location;
+                if (!location) return res.status(400).send('Redirect without location');
+                const resolved = new URL(location, targetUrl).toString();
+                return fetchImage(resolved, redirects + 1);
+            }
+
+            const contentType = imageRes.headers['content-type'];
+            if (!contentType || !contentType.startsWith('image/')) {
+                console.error(`[IMAGE_PROXY] Invalid content type: ${contentType}`);
+                return res.status(400).send('URL does not point to an image');
+            }
 
         // Set response headers
         res.setHeader('Content-Type', contentType);
@@ -4886,9 +4897,12 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
         });
 
     }).on('error', (err) => {
-        console.error(`[IMAGE_PROXY] Error fetching image from ${imageUrl}:`, err.message);
+        console.error(`[IMAGE_PROXY] Error fetching image from ${targetUrl}:`, err.message);
         res.status(500).send('Failed to fetch image');
     });
+  }
+
+  fetchImage(imageUrl);
 });
 
 

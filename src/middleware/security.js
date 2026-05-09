@@ -13,6 +13,7 @@ export function applySecurityMiddleware(app) {
           "https://cdn.tailwindcss.com",
           "https://www.gstatic.com",
         ],
+        scriptSrcAttr: ["'unsafe-inline'"],
         workerSrc: ["'self'", "blob:"],
         styleSrc: [
           "'self'",
