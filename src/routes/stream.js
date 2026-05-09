@@ -55,7 +55,9 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
 
     // Build ffmpeg args — copy codecs to avoid re-encode, output HLS
     const ua = userAgent?.value || 'VLC/3.0';
-    const streamId = `${userId}_${Buffer.from(url).toString('base64').slice(0, 64)}`;
+    // Hex gives more entropy per char than base64 — no collisions for similar URLs
+    const urlHash = Buffer.from(url).toString('hex').slice(0, 64);
+    const streamId = `${userId}_${urlHash}`;
     const streamKey = `${userId}::${streamId}`;
     const streamDir = path.join(HLS_DIR, streamId);
 
