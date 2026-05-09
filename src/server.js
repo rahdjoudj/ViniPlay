@@ -149,7 +149,7 @@ app.use('/api', createMiscRoutes(shared));
 app.use('/stream', createStreamRoutes(shared));
 
 // --- Mount legacy server.js routes (everything not yet extracted) ---
-const legacyApp = require('../../server.js');
+const legacyApp = require('../server.js');
 app.use(legacyApp);
 
 // --- Health check ---
