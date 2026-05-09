@@ -138,6 +138,7 @@ const { createNotificationRoutes } = await import('./routes/notifications.js');
 const { createSettingsRoutes } = await import('./routes/settings.js');
 const { createConfigRoutes } = await import('./routes/config.js');
 const { createMiscRoutes } = await import('./routes/misc.js');
+const { createStreamRoutes } = await import('./routes/stream.js');
 
 app.use('/api/auth', createAuthRoutes(shared));
 app.use('/api/users', createUserRoutes(shared));
@@ -145,6 +146,7 @@ app.use('/api/notifications', createNotificationRoutes(shared));
 app.use('/api', createSettingsRoutes(shared));
 app.use('/api', createConfigRoutes(shared));
 app.use('/api', createMiscRoutes(shared));
+app.use('/stream', createStreamRoutes(shared));
 
 // --- Mount legacy server.js routes (everything not yet extracted) ---
 const legacyApp = require('../../server.js');

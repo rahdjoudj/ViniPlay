@@ -30,13 +30,36 @@ export function detectStreamType(url) {
 }
 
 /**
+ * Resolves a /stream URL to an HLS playlist if the server supports it.
+ * Falls back to the original URL if HLS is unavailable.
+ */
+async function resolveStreamUrl(url) {
+  // Only negotiate HLS for server-transcoded /stream URLs (not /stream/hls ones)
+  if (!url.includes('/stream') || url.includes('/stream/hls')) return url;
+
+  try {
+    const hlsUrl = url.replace('/stream?', '/stream/hls?');
+    const res = await fetch(hlsUrl);
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.playlistUrl && data?.type === 'hls') {
+        return data.playlistUrl;
+      }
+    }
+  } catch {}
+  return url;
+}
+
+/**
  * Creates the best available player for a given URL.
  */
-export function createPlayer({ url, video, isLive = true, onError, onRecovered, onStats }) {
-  const streamType = detectStreamType(url);
+export async function createPlayer({ url, video, isLive = true, onError, onRecovered, onStats }) {
+  // Try HLS negotiation for server-transcoded streams
+  const resolvedUrl = await resolveStreamUrl(url);
+  const streamType = detectStreamType(resolvedUrl);
 
   if ((streamType.type === 'hls' || streamType.type === 'vod') && typeof Hls !== 'undefined' && Hls.isSupported()) {
-    return createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered, onStats });
+    return createHlsPlayer({ url: resolvedUrl, video, isLive, streamType, onError, onRecovered, onStats });
   }
 
   if (typeof mpegts !== 'undefined' && mpegts.isSupported()) {

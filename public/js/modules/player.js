@@ -94,7 +94,7 @@ function updateStreamInfo({ resolution, buffer, fps, dropped, bandwidth, videoCo
   if (UIElements.streamInfoAudio) UIElements.streamInfoAudio.textContent = `A Codec: ${audioCodec || 'N/A'}`;
 }
 
-export const playChannel = (url, name, channelId) => {
+export const playChannel = async (url, name, channelId) => {
   if (!retryTimeout) retryCount = 0;
   currentChannelInfo = { url, name, channelId };
 
@@ -141,7 +141,7 @@ export const playChannel = (url, name, channelId) => {
   if (appState.player) { appState.player.stop(); appState.player = null; }
   if (streamInfoInterval) { clearInterval(streamInfoInterval); streamInfoInterval = null; }
 
-  appState.player = createPlayer({
+  appState.player = await createPlayer({
     url: streamUrl,
     video: UIElements.videoElement,
     isLive: true,
@@ -228,7 +228,7 @@ export const playVOD = async (url, title, logo = '') => {
     startRedirectStream(url, null, title, logo).then(id => { if (id) currentRedirectHistoryId = id; });
   }
 
-  appState.player = createPlayer({
+  appState.player = await createPlayer({
     url: streamUrl,
     video: UIElements.videoElement,
     isLive: false,

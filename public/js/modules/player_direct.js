@@ -179,7 +179,7 @@ function playVODStream(url, streamType) {
   video.src = strUrl;
 }
 
-function playLiveStream(url, streamType) {
+async function playLiveStream(url, streamType) {
   let streamUrl = url;
 
   if (!UIElements.directPlayCheckbox.checked) {
@@ -199,7 +199,7 @@ function playLiveStream(url, streamType) {
 
   const video = UIElements.directVideoElement;
 
-  appState.player = createPlayer({
+  appState.player = await createPlayer({
     url: streamUrl,
     video,
     isLive: true,
