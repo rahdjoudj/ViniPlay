@@ -204,6 +204,15 @@ const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 2,
+    name: 'replace_connect_sqlite3_sessions',
+    up: (db) => {
+      // connect-sqlite3 created a sessions table with incompatible schema.
+      // Drop it so the new better-sqlite3 session store recreates it cleanly.
+      db.exec('DROP TABLE IF EXISTS sessions');
+    },
+  },
 ];
 
 export function runMigrations(db) {
