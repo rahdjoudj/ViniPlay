@@ -35,6 +35,7 @@ export function applySecurityMiddleware(app) {
     message: { error: 'Too many login attempts. Please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { trustProxy: false },
   });
 
   app.use('/api/auth/login', authLimiter);
@@ -46,6 +47,7 @@ export function applySecurityMiddleware(app) {
     message: { error: 'Too many requests. Please slow down.' },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { trustProxy: false },
   });
 
   app.use('/api', apiLimiter);
