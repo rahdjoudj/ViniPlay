@@ -88,27 +88,19 @@ function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered,
   hls.attachMedia(video);
 
   hls.on(Hls.Events.ERROR, (_event, data) => {
-    if (data.fatal) {
-      switch (data.type) {
-        case Hls.ErrorTypes.NETWORK_ERROR:
-          if (recoverAttempts < MAX_RECOVERY) {
-            recoverAttempts++;
-            hls.startLoad();
-          } else {
-            onError?.('NetworkError', data.details, true);
-          }
-          break;
-        case Hls.ErrorTypes.MEDIA_ERROR:
-          if (recoverAttempts < MAX_RECOVERY) {
-            recoverAttempts++;
-            hls.recoverMediaError();
-          } else {
-            onError?.('MediaError', data.details, true);
-          }
-          break;
-        default:
-          onError?.(data.type, data.details, true);
+    if (!data.fatal) return;
+    if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+      if (recoverAttempts < MAX_RECOVERY) {
+        recoverAttempts++;
+        hls.recoverMediaError();
+        return;
       }
+    }
+    // Let HLS.js internally retry network/manifest errors with backoff
+    if (recoverAttempts >= MAX_RECOVERY) {
+      onError?.(data.type, data.details, true);
+    } else {
+      recoverAttempts++;
     }
   });
 
