@@ -1,0 +1,11 @@
+node_modules/
+.env
+viniplay-data/
+viniplay-dvr/
+*.db
+*.db-journal
+*.db-wal
+dist/
+public/js/bundle.min.js
+public/js/bundle.min.js.map
+coverage/

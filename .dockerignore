@@ -11,5 +11,19 @@ npm-debug.log
 Dockerfile
 docker-compose.yml
 
-# Persistent data directory (should be mounted as a volume, not copied)
+# Persistent data directories (should be mounted as volumes, not copied)
 viniplay-data
+viniplay-dvr
+
+# Git
+.git
+.gitignore
+
+# Tests and coverage
+tests
+coverage
+vitest.config.js
+
+# Source maps and build artifacts
+public/js/bundle.min.js
+public/js/bundle.min.js.map

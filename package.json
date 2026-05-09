@@ -1,28 +1,42 @@
 {
   "name": "viniplay",
-  "version": "main_0.11",
+  "version": "0.12.0",
   "description": "A simple IPTV player with server-side storage and user authentication.",
-  "main": "server.js",
+  "type": "module",
+  "main": "src/server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "build:frontend": "node scripts/build-frontend.js"
   },
   "author": "Andrea Ardovini",
   "license": "CC BY-NC-SA 4.0",
   "dependencies": {
     "axios": "^1.7.2",
-    "body-parser": "^1.20.3",
-    "express": "^4.21.2",
-    "multer": "^2.0.2",
-    "bcrypt": "^6.0.0",
-    "express-session": "^1.18.2",
-    "sqlite3": "^5.1.7",
-    "connect-sqlite3": "^0.9.16",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.7.0",
     "dotenv": "^16.4.5",
-    "xml-js": "^1.6.11",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "express-session": "^1.18.2",
     "fuse.js": "^7.1.0",
-    "web-push": "^3.6.7",
+    "helmet": "^8.0.0",
+    "hls.js": "^1.6.16",
+    "multer": "^2.0.2",
     "node-schedule": "^2.1.1",
-    "diskusage": "^1.2.0",
-    "systeminformation": "^5.27.11"
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "systeminformation": "^5.27.11",
+    "web-push": "^3.6.7",
+    "xml-js": "^1.6.11",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^3.0.0",
+    "esbuild": "^0.25.0",
+    "vitest": "^3.0.0"
   }
 }
