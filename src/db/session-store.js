@@ -1,6 +1,7 @@
+import { EventEmitter } from 'events';
 import { getDb } from './index.js';
 
-export class SessionStore {
+export class SessionStore extends EventEmitter {
   constructor() {
     const db = getDb();
     db.exec(`CREATE TABLE IF NOT EXISTS sessions (
