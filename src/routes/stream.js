@@ -92,10 +92,14 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       path.join(streamDir, 'stream.m3u8'),
     ];
 
-    logger.info({ streamKey, url: url.slice(0, 80) }, 'Starting HLS stream');
+    logger.info({ streamKey, url: url.slice(0, 80), args: ffmpegArgs.join(' ') }, 'Starting HLS stream');
 
     const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
-      stdio: ['ignore', 'ignore', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    ffmpeg.stderr.on('data', (data) => {
+      logger.info({ streamKey, msg: data.toString().trim().slice(0, 200) }, 'ffmpeg');
     });
 
     const streamInfo = {
@@ -112,10 +116,6 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     };
 
     hlsStreams.set(streamKey, streamInfo);
-
-    ffmpeg.stderr.on('data', (data) => {
-      logger.debug({ streamKey, msg: data.toString().trim() }, 'ffmpeg:hls');
-    });
 
     ffmpeg.on('close', (code) => {
       logger.info({ streamKey, code }, 'HLS stream ended');
