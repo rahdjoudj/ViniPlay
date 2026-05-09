@@ -147,14 +147,15 @@ app.use('/api', createConfigRoutes(shared));
 app.use('/api', createMiscRoutes(shared));
 app.use('/stream', createStreamRoutes(shared));
 
-// --- Mount legacy server.js routes (everything not yet extracted) ---
-const legacyApp = require('../server.cjs');
-app.use(legacyApp);
-
-// --- Health check ---
+// --- Health check (before legacy mount so it's reachable) ---
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', version: '0.12.0', uptime: process.uptime() });
 });
+
+// --- Mount legacy server.js routes (everything not yet extracted) ---
+// Mounted after new routes so our handlers take priority.
+const legacyApp = require('../server.cjs');
+app.use(legacyApp);
 
 // --- SPA fallback ---
 app.get('*', (req, res) => {
