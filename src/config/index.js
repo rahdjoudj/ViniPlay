@@ -6,6 +6,7 @@ import { logger } from './logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.dirname(path.dirname(__dirname));
 
 const envSchema = z.object({
   SESSION_SECRET: z.string().min(32).optional(),
@@ -35,7 +36,7 @@ export const VAPID_KEYS_PATH = path.join(DATA_DIR, 'vapid.json');
 export const SOURCES_DIR = path.join(DATA_DIR, 'sources');
 export const RAW_CACHE_DIR = path.join(SOURCES_DIR, 'raw_cache');
 export const IMAGE_CACHE_DIR = path.join(DATA_DIR, 'image_cache');
-export const PUBLIC_DIR = path.join(path.dirname(__dirname), 'public');
+export const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 export const DB_PATH = path.join(DATA_DIR, 'viniplay.db');
 export const LIVE_CHANNELS_M3U_PATH = path.join(DATA_DIR, 'live_channels.m3u');
 export const LIVE_EPG_JSON_PATH = path.join(DATA_DIR, 'epg.json');
