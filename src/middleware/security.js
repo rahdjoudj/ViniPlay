@@ -17,6 +17,7 @@ export function applySecurityMiddleware(app) {
           "'self'",
           "'unsafe-inline'",
           "https://cdn.jsdelivr.net",
+          "https://fonts.googleapis.com",
         ],
         imgSrc: ["'self'", "data:", "https:"],
         connectSrc: ["'self'", "https:", "wss:"],
@@ -25,6 +26,8 @@ export function applySecurityMiddleware(app) {
       },
     },
     crossOriginEmbedderPolicy: false,
+    crossOriginOpenerPolicy: false,
+    crossOriginResourcePolicy: false,
   }));
 
   const authLimiter = rateLimit({
