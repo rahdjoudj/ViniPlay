@@ -145,7 +145,9 @@ app.use('/api/notifications', createNotificationRoutes(shared));
 app.use('/api', createSettingsRoutes(shared));
 app.use('/api', createConfigRoutes(shared));
 app.use('/api', createMiscRoutes(shared));
-app.use('/stream', createStreamRoutes(shared));
+const streamRoutes = createStreamRoutes(shared);
+app.use('/stream', streamRoutes);
+app.use('/api/stream', streamRoutes);
 
 // --- Health check (before legacy mount so it's reachable) ---
 app.get('/api/health', (_req, res) => {

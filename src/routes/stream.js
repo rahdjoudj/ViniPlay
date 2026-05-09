@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { spawn } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../config/logger.js';
@@ -55,8 +56,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
 
     // Build ffmpeg args — copy codecs to avoid re-encode, output HLS
     const ua = userAgent?.value || 'VLC/3.0';
-    // Hex gives more entropy per char than base64 — no collisions for similar URLs
-    const urlHash = Buffer.from(url).toString('hex').slice(0, 64);
+    const urlHash = crypto.createHash('sha256').update(url).digest('hex').slice(0, 16);
     const streamId = `${userId}_${urlHash}`;
     const streamKey = `${userId}::${streamId}`;
     const streamDir = path.join(HLS_DIR, streamId);
@@ -146,18 +146,42 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
   });
 
-  // Stop an HLS stream
-  router.post('/hls/stop', (req, res) => {
-    const { streamKey } = req.body;
-    const info = hlsStreams.get(streamKey);
-    if (info) {
-      info.references = Math.max(0, info.references - 1);
-      if (info.references <= 0) {
-        info.ffmpeg.kill('SIGTERM');
-        hlsStreams.delete(streamKey);
-        try { fs.rmSync(info.streamDir, { recursive: true, force: true }); } catch {}
-      }
+  // Stop an HLS stream — accepts both { streamKey } and { url } formats
+  function stopHlsStream(lookup) {
+    // Direct streamKey lookup
+    if (lookup.streamKey) {
+      const info = hlsStreams.get(lookup.streamKey);
+      if (info) { killHls(info, lookup.streamKey); return true; }
     }
+    // URL-based lookup: compute hash and try
+    if (lookup.url) {
+      const userId = lookup.userId || 1;
+      const hash = crypto.createHash('sha256').update(lookup.url).digest('hex').slice(0, 16);
+      const key = `${userId}::${userId}_${hash}`;
+      const info = hlsStreams.get(key);
+      if (info) { killHls(info, key); return true; }
+    }
+    return false;
+  }
+
+  function killHls(info, key) {
+    info.references = Math.max(0, info.references - 1);
+    if (info.references <= 0) {
+      info.ffmpeg.kill('SIGTERM');
+      hlsStreams.delete(key);
+      try { fs.rmSync(info.streamDir, { recursive: true, force: true }); } catch {}
+    }
+  }
+
+  router.post('/hls/stop', (req, res) => {
+    stopHlsStream(req.body);
+    res.json({ success: true });
+  });
+
+  // Also handle the legacy /stream/stop path — the frontend sends this
+  router.post('/stop', (req, res, next) => {
+    const found = stopHlsStream({ url: req.body.url });
+    if (!found) return next(); // fall through to legacy handler for old-style streams
     res.json({ success: true });
   });
 
