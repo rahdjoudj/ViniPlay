@@ -769,7 +769,7 @@ export function handleSearchAndFilter(shouldCenter = false, preserveScroll = fal
         if (selectedGroup === 'favorites') {
             baseFilteredChannels = baseFilteredChannels.filter(ch => ch.isFavorite);
         } else if (selectedGroup === 'recents') {
-            const recentIds = guideState.settings.recentChannels || [];
+            const recentIds = Array.isArray(guideState.settings.recentChannels) ? guideState.settings.recentChannels : [];
             baseFilteredChannels = recentIds.map(id => guideState.channels.find(ch => ch.id === id)).filter(Boolean);
         } else {
             baseFilteredChannels = baseFilteredChannels.filter(ch => ch.group === selectedGroup);

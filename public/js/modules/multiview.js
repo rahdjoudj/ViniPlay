@@ -862,7 +862,7 @@ export function populateChannelSelector() {
         const favoriteIds = new Set(guideState.settings.favorites || []);
         channelsToDisplay = guideState.channels.filter(ch => favoriteIds.has(ch.id));
     } else if (filter === 'recents') {
-        const recentIds = guideState.settings.recentChannels || [];
+        const recentIds = Array.isArray(guideState.settings.recentChannels) ? guideState.settings.recentChannels : [];
         channelsToDisplay = recentIds.map(id => guideState.channels.find(ch => ch.id === id)).filter(Boolean);
     } else {
         channelsToDisplay = [...guideState.channels];

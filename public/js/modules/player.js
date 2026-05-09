@@ -99,7 +99,8 @@ export const playChannel = async (url, name, channelId) => {
   currentChannelInfo = { url, name, channelId };
 
   if (channelId) {
-    const recent = [channelId, ...(guideState.settings.recentChannels || []).filter(id => id !== channelId)].slice(0, 15);
+    const prev = Array.isArray(guideState.settings.recentChannels) ? guideState.settings.recentChannels : [];
+    const recent = [channelId, ...prev.filter(id => id !== channelId)].slice(0, 15);
     guideState.settings.recentChannels = recent;
     saveUserSetting('recentChannels', recent);
   }
