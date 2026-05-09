@@ -21,9 +21,19 @@ export function createAuthRoutes({ db }) {
       return res.status(400).json({ error: 'Username and password are required.' });
     }
     const hash = bcrypt.hashSync(password, SALT_ROUNDS);
-    db.prepare('INSERT INTO users (username, password, isAdmin, canUseDvr) VALUES (?, ?, 1, 1)').run(username, hash);
-    logger.info({ username }, 'Admin user created');
-    res.json({ success: true });
+    const result = db.prepare('INSERT INTO users (username, password, isAdmin, canUseDvr) VALUES (?, ?, 1, 1)').run(username, hash);
+    const userId = result.lastInsertRowid;
+    logger.info({ username, userId }, 'Admin user created');
+
+    req.session.userId = userId;
+    req.session.username = username;
+    req.session.isAdmin = true;
+    req.session.canUseDvr = true;
+
+    res.json({
+      isLoggedIn: true,
+      user: { id: userId, username, isAdmin: true, canUseDvr: true },
+    });
   });
 
   router.post('/login', (req, res) => {
@@ -41,10 +51,13 @@ export function createAuthRoutes({ db }) {
     req.session.canUseDvr = !!user.canUseDvr || !!user.isAdmin;
     logger.info({ userId: user.id, username: user.username }, 'User logged in');
     res.json({
-      id: user.id,
-      username: user.username,
-      isAdmin: !!user.isAdmin,
-      canUseDvr: !!user.canUseDvr || !!user.isAdmin,
+      isLoggedIn: true,
+      user: {
+        id: user.id,
+        username: user.username,
+        isAdmin: !!user.isAdmin,
+        canUseDvr: !!user.canUseDvr || !!user.isAdmin,
+      },
     });
   });
 
@@ -60,14 +73,17 @@ export function createAuthRoutes({ db }) {
       const user = db.prepare('SELECT id, username, isAdmin, canUseDvr FROM users WHERE id = ?').get(req.session.userId);
       if (user) {
         return res.json({
-          id: user.id,
-          username: user.username,
-          isAdmin: !!user.isAdmin,
-          canUseDvr: !!user.canUseDvr || !!user.isAdmin,
+          isLoggedIn: true,
+          user: {
+            id: user.id,
+            username: user.username,
+            isAdmin: !!user.isAdmin,
+            canUseDvr: !!user.canUseDvr || !!user.isAdmin,
+          },
         });
       }
     }
-    res.json(null);
+    res.json({ isLoggedIn: false });
   });
 
   return router;
