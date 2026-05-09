@@ -66,3 +66,8 @@ export function formatTimeWithOffset(date, offsetHours = 0) {
 
     return `${hours}:${minutes}`;
 }
+
+export function proxyImageUrl(url) {
+    if (!url || !url.startsWith('http')) return url;
+    return `/api/image-proxy?url=${encodeURIComponent(url)}`;
+}

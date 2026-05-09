@@ -8,6 +8,7 @@ import { UIElements, guideState, appState } from './state.js';
 import { showNotification } from './ui.js';
 import { saveUserSetting, stopStream, startRedirectStream, stopRedirectStream } from './api.js';
 import { createPlayer, setupKeyboardShortcuts, detectStreamType } from './player-core.js';
+import { proxyImageUrl } from './utils.js';
 
 const MAX_RECENT_LINKS = 10;
 let currentStreamUrl = null;
@@ -193,7 +194,7 @@ async function playLiveStream(url, streamType) {
     logToPlayerConsole('Direct Play ON — connecting directly.');
     if (currentRedirectHistoryId) { stopRedirectStream(currentRedirectHistoryId); currentRedirectHistoryId = null; }
     const channel = (guideState.channels || []).find(c => c.url === url);
-    startRedirectStream(url, channel?.id || null, channel?.displayName || channel?.name || 'Direct Stream', channel?.logo || null)
+    startRedirectStream(url, channel?.id || null, channel?.displayName || channel?.name || 'Direct Stream', proxyImageUrl(channel?.logo) || null)
       .then(id => { if (id) currentRedirectHistoryId = id; });
   }
 

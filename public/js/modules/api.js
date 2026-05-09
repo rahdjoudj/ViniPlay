@@ -169,9 +169,9 @@ export async function getVapidKey() {
         console.error('[API] Failed to get VAPID public key from server.');
         return null;
     }
-    const key = await res.text();
+    const data = await res.json();
     console.log('[API] VAPID public key fetched successfully.');
-    return key;
+    return data.publicKey;
 }
 
 /**

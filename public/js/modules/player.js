@@ -10,6 +10,7 @@ import { showNotification, openModal, closeModal } from './ui.js';
 import { castState, loadMedia, setLocalPlayerState } from './cast.js';
 import { ICONS } from './icons.js';
 import { createPlayer, setupMediaSession, clearMediaSession, setupKeyboardShortcuts } from './player-core.js';
+import { proxyImageUrl } from './utils.js';
 
 let streamInfoInterval = null;
 let currentLocalStreamUrl = null;
@@ -126,7 +127,7 @@ export const playChannel = async (url, name, channelId) => {
   const streamUrl = profile.command === 'redirect' ? url
     : `/stream?url=${encodeURIComponent(url)}&profileId=${profileId}&userAgentId=${userAgentId}`;
   const channel = guideState.channels.find(c => c.id === channelId);
-  const logo = channel?.logo || '';
+  const logo = proxyImageUrl(channel?.logo) || '';
 
   if (castState.isCasting) {
     const absUrl = streamUrl.startsWith('http') ? streamUrl : `${window.location.origin}${streamUrl}`;
