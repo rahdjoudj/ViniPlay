@@ -25,32 +25,31 @@ export class SessionStore extends EventEmitter {
   get(sid, cb) {
     try {
       const row = this._get.get(sid, Date.now());
-      cb(null, row ? JSON.parse(row.data) : null);
-    } catch (err) { cb(err); }
+      process.nextTick(() => cb(null, row ? JSON.parse(row.data) : null));
+    } catch (err) { process.nextTick(() => cb(err)); }
   }
 
   set(sid, session, cb) {
     try {
       const maxAge = session.cookie?.maxAge ?? 30 * 24 * 60 * 60 * 1000;
       this._set.run(sid, Date.now() + maxAge, JSON.stringify(session));
-      cb(null);
-    } catch (err) { cb(err); }
+      process.nextTick(() => cb(null));
+    } catch (err) { process.nextTick(() => cb(err)); }
   }
 
   destroy(sid, cb) {
-    try { this._del.run(sid); cb(null); } catch (err) { cb(err); }
+    try { this._del.run(sid); process.nextTick(() => cb(null)); } catch (err) { process.nextTick(() => cb(err)); }
   }
 
   createSession(_req, sess, cb) {
-    // express-session v1.18.x can call this with or without a callback
-    if (typeof cb === 'function') { cb(null, sess); }
+    if (typeof cb === 'function') { process.nextTick(() => cb(null, sess)); }
   }
 
   touch(sid, session, cb) {
     try {
       const maxAge = session.cookie?.maxAge ?? 30 * 24 * 60 * 60 * 1000;
       this._touch.run(Date.now() + maxAge, sid, Date.now());
-      cb(null);
-    } catch (err) { cb(err); }
+      process.nextTick(() => cb(null));
+    } catch (err) { process.nextTick(() => cb(err)); }
   }
 }
