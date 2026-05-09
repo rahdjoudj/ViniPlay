@@ -41,6 +41,8 @@ export class SessionStore extends EventEmitter {
     try { this._del.run(sid); cb(null); } catch (err) { cb(err); }
   }
 
+  createSession(_req, _session, cb) { cb?.(); }
+
   touch(sid, session, cb) {
     try {
       const maxAge = session.cookie?.maxAge ?? 30 * 24 * 60 * 60 * 1000;
