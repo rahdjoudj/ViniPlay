@@ -45,6 +45,7 @@ export function applySecurityMiddleware(app) {
   const apiLimiter = rateLimit({
     windowMs: 60 * 1000,
     max: 200,
+    skip: (req) => req.path === '/image-proxy',
     message: { error: 'Too many requests. Please slow down.' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -52,4 +53,15 @@ export function applySecurityMiddleware(app) {
   });
 
   app.use('/api', apiLimiter);
+
+  const imageProxyLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 600,
+    message: { error: 'Too many image requests. Please slow down.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { trustProxy: false },
+  });
+
+  app.use('/api/image-proxy', imageProxyLimiter);
 }
