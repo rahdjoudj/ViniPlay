@@ -41,7 +41,7 @@ export class SessionStore extends EventEmitter {
     try { this._del.run(sid); cb(null); } catch (err) { cb(err); }
   }
 
-  createSession(_req, _session, cb) { cb?.(); }
+  createSession(_req, sess, cb) { cb(null, sess); }
 
   touch(sid, session, cb) {
     try {
