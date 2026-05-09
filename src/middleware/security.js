@@ -6,11 +6,21 @@ export function applySecurityMiddleware(app) {
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'", "https://www.gstatic.com"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://cdn.jsdelivr.net",
+          "https://cdn.tailwindcss.com",
+          "https://www.gstatic.com",
+        ],
+        styleSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://cdn.jsdelivr.net",
+        ],
         imgSrc: ["'self'", "data:", "https:"],
-        connectSrc: ["'self'", "ws:", "wss:"],
-        mediaSrc: ["'self'", "blob:"],
+        connectSrc: ["'self'", "https:", "wss:"],
+        mediaSrc: ["'self'", "blob:", "https:"],
         frameSrc: ["'self'"],
       },
     },
