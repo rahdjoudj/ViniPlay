@@ -41,7 +41,10 @@ export class SessionStore extends EventEmitter {
     try { this._del.run(sid); cb(null); } catch (err) { cb(err); }
   }
 
-  createSession(_req, sess, cb) { cb(null, sess); }
+  createSession(_req, sess, cb) {
+    // express-session v1.18.x can call this with or without a callback
+    if (typeof cb === 'function') { cb(null, sess); }
+  }
 
   touch(sid, session, cb) {
     try {
