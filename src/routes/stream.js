@@ -71,10 +71,17 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     if (!fs.existsSync(streamDir)) fs.mkdirSync(streamDir, { recursive: true });
 
     // Build ffmpeg HLS command
+    // Build ffmpeg HLS command using the user's profile template
+    let cmdTemplate = (profile?.command || '-i {streamUrl} -c copy')
+      .replace(/{streamUrl}/g, url)
+      .replace(/{userAgent}|{clientUserAgent}/g, ua);
+    // Strip old output directives (pipe, file) — we replace with HLS
+    cmdTemplate = cmdTemplate.replace(/-f\s+\S+\s+pipe:\d?\s*$/, '').trim();
+    cmdTemplate = cmdTemplate.replace(/-f\s+\S+\s+\S+\s*$/, '').trim();
+    const profileArgs = (cmdTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(a => a.replace(/^"|"$/g, ''));
+
     const ffmpegArgs = [
-      '-headers', `User-Agent: ${ua}`,
-      '-i', url,
-      '-c', 'copy',
+      ...profileArgs,
       '-f', 'hls',
       '-hls_time', String(HLS_SEGMENT_TIME),
       '-hls_list_size', String(HLS_LIST_SIZE),
