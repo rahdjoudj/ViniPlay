@@ -14,6 +14,7 @@ import { requireAuth } from './middleware/auth.js';
 const require = createRequire(import.meta.url);
 const app = express();
 const port = env.PORT;
+app.set('trust proxy', true);
 
 // --- Ensure directories exist ---
 for (const dir of [PUBLIC_DIR, SOURCES_DIR, DVR_DIR, RAW_CACHE_DIR, LOGS_DIR, IMAGE_CACHE_DIR]) {

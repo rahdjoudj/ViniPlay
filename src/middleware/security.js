@@ -26,7 +26,6 @@ export function applySecurityMiddleware(app) {
       },
     },
     crossOriginEmbedderPolicy: false,
-    crossOriginOpenerPolicy: false,
     crossOriginResourcePolicy: false,
   }));
 
