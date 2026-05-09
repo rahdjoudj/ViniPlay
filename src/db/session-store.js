@@ -3,6 +3,8 @@ import { getDb } from './index.js';
 
 export class SessionStore extends EventEmitter {
   constructor() {
+    super();
+
     const db = getDb();
     db.exec(`CREATE TABLE IF NOT EXISTS sessions (
       sid TEXT PRIMARY KEY,
