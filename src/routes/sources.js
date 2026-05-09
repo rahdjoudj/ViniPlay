@@ -39,17 +39,8 @@ export function createSourceRoutes({ db, getSettings, saveSettings }) {
     }
   });
 
-  router.post('/', requireAuth, upload.single('sourceFile'), (_req, res) => {
-    res.status(501).json({ error: 'Source management not yet migrated. Use legacy endpoint.' });
-  });
-
-  router.put('/:sourceType/:id', requireAuth, (_req, res) => {
-    res.status(501).json({ error: 'Source management not yet migrated.' });
-  });
-
-  router.delete('/:sourceType/:id', requireAuth, (_req, res) => {
-    res.status(501).json({ error: 'Source management not yet migrated.' });
-  });
+  // Source CRUD and process-sources are handled by the legacy bridge (server.cjs).
+  // These stubs are intentionally removed — they were blocking the real implementations.
 
   return router;
 }
