@@ -126,8 +126,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
 
     ffmpeg.on('error', (err) => {
       logger.error({ streamKey, err }, 'HLS stream error');
-      hlsStreams.delete(streamKey);
-      try { fs.rmSync(streamDir, { recursive: true, force: true }); } catch {}
+      // close handler will fire next and clean up
     });
 
     // Cleanup stale streams every 5 minutes
@@ -136,9 +135,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       for (const [key, info] of hlsStreams) {
         if (info.references <= 0 && (now - info.lastAccess > 300_000)) {
           logger.info({ streamKey: key }, 'Cleaning up inactive HLS stream');
-          info.ffmpeg.kill('SIGTERM');
-          hlsStreams.delete(key);
-          try { fs.rmSync(info.streamDir, { recursive: true, force: true }); } catch {}
+          killHls(info, key);
         }
       }
     }, 300_000).unref();
@@ -167,9 +164,9 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
   function killHls(info, key) {
     info.references = Math.max(0, info.references - 1);
     if (info.references <= 0) {
+      info.stopped = true;
       info.ffmpeg.kill('SIGTERM');
-      hlsStreams.delete(key);
-      try { fs.rmSync(info.streamDir, { recursive: true, force: true }); } catch {}
+      // Don't delete dir here — ffmpeg close handler will clean up
     }
   }
 
