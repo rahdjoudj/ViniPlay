@@ -273,16 +273,12 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
     }
 });
 
-// --- Middleware ---
-// 1. Smart Caching for API: Allow cache presence but FORCE revalidation every time.
-// 'no-cache' = "Check with server before using cached copy".
+if (isMainModule) {
+// --- Middleware (only when running standalone) ---
 app.use('/api', (req, res, next) => {
     res.set('Cache-Control', 'private, no-cache, must-revalidate');
     next();
 });
-
-// 2. Smart Caching for Static Files:
-// Allow browser to cache index.html/js, but REQUIRE it to check if they changed (304 Not Modified)
 app.use(express.static(PUBLIC_DIR, {
     setHeaders: (res, path) => {
         if (path.endsWith('index.html') || path.endsWith('.js')) {
@@ -292,6 +288,7 @@ app.use(express.static(PUBLIC_DIR, {
 }));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+}
 
 const updateAndScheduleSourceRefreshes = () => {
     console.log('[SCHEDULER] Updating and scheduling all source refreshes...');
@@ -350,7 +347,8 @@ function saveSettings(settings) {
     }
 }
 
-// --- Session Management ---
+if (isMainModule) {
+// --- Session Management (only when running standalone) ---
 let sessionSecret = process.env.SESSION_SECRET;
 
 if (!sessionSecret) {
@@ -385,16 +383,13 @@ app.use(
 );
 
 app.use((req, res, next) => {
-    // Add client IP to the request object for logging
     req.clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-
-    if (req.path === '/api/events') {
-        return next();
-    }
+    if (req.path === '/api/events') return next();
     const user_info = req.session.userId ? `User ID: ${req.session.userId}, Admin: ${req.session.isAdmin}, DVR: ${req.session.canUseDvr}` : 'No session';
     console.log(`[HTTP_TRACE] ${req.method} ${req.originalUrl} - IP: ${req.clientIp} - Session: [${user_info}]`);
     next();
 });
+} // end isMainModule
 
 // MODIFIED: requireAuth now checks if the user still exists in the database on every request.
 const requireAuth = (req, res, next) => {
@@ -428,10 +423,10 @@ const requireDvrAccess = (req, res, next) => {
 };
 
 // *** FIX: DVR Playback Access ***
-// Removed `requireDvrAccess` from this route. Now, any authenticated user can access
-// the /dvr directory to play back recorded files. The API endpoints for creating
-// and managing recordings remain protected by `requireDvrAccess`.
+// When running as a module, the parent app handles /dvr static serving.
+if (isMainModule) {
 app.use('/dvr', requireAuth, express.static(DVR_DIR));
+}
 
 // --- Helper Functions ---
 /**
@@ -5070,7 +5065,11 @@ app.get('*', (req, res) => {
 });
 
 // --- Server Start ---
-// NEW: Run hardware detection before starting the server
+// When loaded as a module, export the app and skip listen.
+// When run directly (node server.js), start the full server.
+const isMainModule = require.main === module;
+
+if (isMainModule) {
 detectHardwareAcceleration().then(() => {
     app.listen(port, () => {
         console.log(`\n======================================================`);
@@ -5096,6 +5095,9 @@ detectHardwareAcceleration().then(() => {
 
     });
 });
+} // end if (isMainModule)
+
+module.exports = app;
 
 // --- Helper Functions (Full Implementation) ---
 function parseM3U(data) {

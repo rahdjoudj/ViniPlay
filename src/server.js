@@ -3,6 +3,7 @@ import express from 'express';
 import session from 'express-session';
 import crypto from 'crypto';
 import fs from 'fs';
+import { createRequire } from 'module';
 import webpush from 'web-push';
 import { getDb, closeDb } from './db/index.js';
 import { logger } from './config/logger.js';
@@ -10,6 +11,7 @@ import { env, DATA_DIR, DVR_DIR, PUBLIC_DIR, SOURCES_DIR, RAW_CACHE_DIR, LOGS_DI
 import { applySecurityMiddleware } from './middleware/security.js';
 import { requireAuth } from './middleware/auth.js';
 
+const require = createRequire(import.meta.url);
 const app = express();
 const port = env.PORT;
 
@@ -19,7 +21,7 @@ for (const dir of [PUBLIC_DIR, SOURCES_DIR, DVR_DIR, RAW_CACHE_DIR, LOGS_DIR, IM
 }
 logger.info('Required directories ensured');
 
-// --- Security middleware (helmet, CORS, rate limiting) ---
+// --- Security middleware (helmet, rate limiting) ---
 applySecurityMiddleware(app);
 
 // --- Static files ---
@@ -119,34 +121,46 @@ try {
   logger.error({ err: error }, 'Failed to setup VAPID keys');
 }
 
-// --- Shared state (passed to routes/services) ---
-export const sseClients = new Map();
-export const activeStreamProcesses = new Map();
-export const activeCastTokens = new Map();
-export const activeDvrJobs = new Map();
+// --- Shared state ---
+const sseClients = new Map();
+const activeStreamProcesses = new Map();
+const activeCastTokens = new Map();
+const activeDvrJobs = new Map();
+const detectedHardware = {};
 
-// --- Mount route modules ---
+const shared = { db, getSettings, saveSettings, sseClients, activeStreamProcesses, activeCastTokens, activeDvrJobs, vapidKeys, webpush, detectedHardware };
+
+// --- Mount new modular routes (take priority) ---
 const { createAuthRoutes } = await import('./routes/auth.js');
 const { createUserRoutes } = await import('./routes/users.js');
 const { createNotificationRoutes } = await import('./routes/notifications.js');
 const { createSettingsRoutes } = await import('./routes/settings.js');
-const { createSourceRoutes } = await import('./routes/sources.js');
-
-const shared = { db, getSettings, saveSettings, sseClients, activeStreamProcesses, activeCastTokens, activeDvrJobs, vapidKeys, webpush };
+const { createConfigRoutes } = await import('./routes/config.js');
+const { createMiscRoutes } = await import('./routes/misc.js');
 
 app.use('/api/auth', createAuthRoutes(shared));
 app.use('/api/users', createUserRoutes(shared));
 app.use('/api/notifications', createNotificationRoutes(shared));
 app.use('/api', createSettingsRoutes(shared));
-app.use('/api/sources', createSourceRoutes(shared));
+app.use('/api', createConfigRoutes(shared));
+app.use('/api', createMiscRoutes(shared));
 
-// Legacy routes not yet extracted
-import { registerLegacyRoutes } from './routes/legacy.js';
-registerLegacyRoutes(app, shared);
+// --- Mount legacy server.js routes (everything not yet extracted) ---
+const legacyApp = require('../../server.js');
+app.use(legacyApp);
 
 // --- Health check ---
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', version: '0.12.0', uptime: process.uptime() });
+});
+
+// --- SPA fallback ---
+app.get('*', (req, res) => {
+  const filePath = `${PUBLIC_DIR}${req.path}`;
+  if (fs.existsSync(filePath) && fs.lstatSync(filePath).isFile()) {
+    return res.sendFile(filePath);
+  }
+  res.sendFile(`${PUBLIC_DIR}/index.html`);
 });
 
 // --- Error handler ---
