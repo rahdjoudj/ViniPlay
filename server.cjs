@@ -16,7 +16,7 @@ const bodyParser = require('body-parser');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
 const sqlite3 = require('sqlite3').verbose();
-const SQLiteStore = require('connect-sqlite3')(session);
+let SQLiteStore; // Lazy-init inside isMainModule guard, avoids requiring connect-sqlite3 when loaded as module
 const xmlJS = require('xml-js');
 const zlib = require('zlib');
 const webpush = require('web-push');
@@ -24,9 +24,10 @@ const schedule = require('node-schedule');
 const disk = require('diskusage');
 const si = require('systeminformation'); // NEW: For system health monitoring
 //vod processor
-const { refreshVodContent, processM3uVod } = require('./vodProcessor');
-const XtreamClient = require('./xtreamClient');
+const { refreshVodContent, processM3uVod } = require('./vodProcessor.cjs');
+const XtreamClient = require('./xtreamClient.cjs');
 
+const isMainModule = require.main === module;
 
 // --- NEW: Live Activity Tracking for Redirects ---
 const activeRedirectStreams = new Map(); // Tracks live redirect streams for the admin UI
@@ -60,8 +61,8 @@ const activeStreamProcesses = new Map();
 const STREAM_INACTIVITY_TIMEOUT = 30000; // 30 seconds to kill an inactive stream process
 
 // --- Configuration ---
-const DATA_DIR = '/data';
-const DVR_DIR = '/dvr';
+const DATA_DIR = process.env.DATA_DIR || '/data';
+const DVR_DIR = process.env.DVR_DIR || '/dvr';
 const LOGS_DIR = path.join(DATA_DIR, 'logs'); // NEW: Log management directory
 const VAPID_KEYS_PATH = path.join(DATA_DIR, 'vapid.json');
 const SOURCES_DIR = path.join(DATA_DIR, 'sources');
@@ -75,6 +76,7 @@ const VOD_MOVIES_JSON_PATH = path.join(DATA_DIR, 'vod_movies.json'); // New
 const VOD_SERIES_JSON_PATH = path.join(DATA_DIR, 'vod_series.json'); // New
 const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
 
+if (isMainModule) {
 console.log(`[INIT] Application starting. Data directory: ${DATA_DIR}, Public directory: ${PUBLIC_DIR}`);
 
 // --- Automatic VAPID Key Generation ---
@@ -110,6 +112,7 @@ try {
     console.error(`[INIT] FATAL: Failed to create necessary directories: ${mkdirError.message}`);
     process.exit(1);
 }
+} // end isMainModule
 
 
 // --- Database Setup ---
@@ -349,6 +352,7 @@ function saveSettings(settings) {
 
 if (isMainModule) {
 // --- Session Management (only when running standalone) ---
+SQLiteStore = require('connect-sqlite3')(session);
 let sessionSecret = process.env.SESSION_SECRET;
 
 if (!sessionSecret) {
@@ -5067,8 +5071,6 @@ app.get('*', (req, res) => {
 // --- Server Start ---
 // When loaded as a module, export the app and skip listen.
 // When run directly (node server.js), start the full server.
-const isMainModule = require.main === module;
-
 if (isMainModule) {
 detectHardwareAcceleration().then(() => {
     app.listen(port, () => {

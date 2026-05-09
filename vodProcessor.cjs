@@ -1,5 +1,5 @@
 // vodProcessor.js
-const XtreamClient = require('./xtreamClient');
+const XtreamClient = require('./xtreamClient.cjs');
 
 /**
  * Main function to refresh all VOD content for a given provider.

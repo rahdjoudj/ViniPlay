@@ -29,8 +29,9 @@ function validateEnv() {
 export const env = validateEnv();
 
 // --- Data Paths ---
-export const DATA_DIR = '/data';
-export const DVR_DIR = '/dvr';
+// Overridable via env vars for testing; default to /data and /dvr for Docker
+export const DATA_DIR = process.env.DATA_DIR || '/data';
+export const DVR_DIR = process.env.DVR_DIR || '/dvr';
 export const LOGS_DIR = path.join(DATA_DIR, 'logs');
 export const VAPID_KEYS_PATH = path.join(DATA_DIR, 'vapid.json');
 export const SOURCES_DIR = path.join(DATA_DIR, 'sources');
