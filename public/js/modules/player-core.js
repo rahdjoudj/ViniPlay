@@ -83,6 +83,11 @@ function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered,
   let statsInterval = null;
   let recoverAttempts = 0;
   const MAX_RECOVERY = 5;
+  let measuredBandwidth = null;
+  let currentVideoCodec = 'HLS';
+  let currentAudioCodec = 'HLS';
+  let prevTotalFrames = 0;
+  let prevFrameTime = 0;
 
   hls.loadSource(url);
   hls.attachMedia(video);
@@ -105,6 +110,17 @@ function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered,
   });
 
   hls.on(Hls.Events.MANIFEST_PARSED, () => {
+    const level = hls.levels[hls.currentLevel] || hls.levels[0];
+    if (level) {
+      currentVideoCodec = getCodecName(level.videoCodec);
+      currentAudioCodec = getCodecName(level.audioCodec);
+    }
+    if (hls.audioTracks && hls.audioTracks.length > 0) {
+      const at = hls.audioTracks[hls.audioTrack] || hls.audioTracks[0];
+      if (at) {
+        currentAudioCodec = getCodecName(at.audioCodec) || currentAudioCodec;
+      }
+    }
     video.play().catch(() => {});
     if (recoverAttempts > 0) {
       onRecovered?.();
@@ -112,17 +128,54 @@ function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered,
     }
   });
 
+  hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
+    const level = hls.levels[data.level];
+    if (level) {
+      currentVideoCodec = getCodecName(level.videoCodec) || currentVideoCodec;
+    }
+  });
+
+  hls.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+    if (data.stats && data.stats.total > 0 && data.stats.loaded > 0) {
+      measuredBandwidth = Math.round(data.stats.loaded / (data.stats.total / 1000)); // bytes/s
+    }
+  });
+
   if (onStats) {
     statsInterval = setInterval(() => {
       const buf = video.buffered.length > 0 ? video.buffered.end(0) - video.currentTime : 0;
+
+      let fps = 'N/A';
+      let dropped = 'N/A';
+      if (video.getVideoPlaybackQuality) {
+        const q = video.getVideoPlaybackQuality();
+        const now = performance.now();
+        const tf = q.totalVideoFrames || 0;
+        if (prevTotalFrames > 0 && prevFrameTime > 0) {
+          const fd = tf - prevTotalFrames;
+          const td = (now - prevFrameTime) / 1000;
+          fps = td > 0 ? (fd / td).toFixed(1) : 'N/A';
+        }
+        prevTotalFrames = tf;
+        prevFrameTime = now;
+        dropped = q.droppedVideoFrames ?? 'N/A';
+      }
+
+      let bandwidth = 'N/A';
+      if (measuredBandwidth !== null) {
+        bandwidth = measuredBandwidth > 1e6
+          ? `${(measuredBandwidth / 1e6).toFixed(1)} Mbps`
+          : `${(measuredBandwidth / 1024).toFixed(0)} kbps`;
+      }
+
       onStats({
         resolution: (video.videoWidth && video.videoHeight) ? `${video.videoWidth}x${video.videoHeight}` : 'N/A',
         buffer: buf.toFixed(2),
-        fps: 'N/A',
-        dropped: 'N/A',
-        bandwidth: 'N/A',
-        videoCodec: 'HLS',
-        audioCodec: 'HLS',
+        fps,
+        dropped,
+        bandwidth,
+        videoCodec: currentVideoCodec,
+        audioCodec: currentAudioCodec,
       });
     }, 2000);
   }

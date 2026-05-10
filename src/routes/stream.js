@@ -86,6 +86,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     const profileArgs = (cmdTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(a => a.replace(/^"|"$/g, ''));
 
     const ffmpegArgs = [
+      '-v', 'level+error',
       ...profileArgs,
       '-f', 'hls',
       '-hls_time', String(HLS_SEGMENT_TIME),
