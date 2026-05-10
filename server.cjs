@@ -4860,7 +4860,7 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
 
             const contentType = imageRes.headers['content-type'];
             if (!contentType || !contentType.startsWith('image/')) {
-                console.error(`[IMAGE_PROXY] Invalid content type: ${contentType}`);
+                console.error(`[IMAGE_PROXY] Non-image response — status: ${imageRes.statusCode}, content-type: ${contentType}, url: ${targetUrl}`);
                 return res.status(400).send('URL does not point to an image');
             }
 
