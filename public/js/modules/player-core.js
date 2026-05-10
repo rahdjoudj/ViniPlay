@@ -135,10 +135,9 @@ function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered,
     }
   });
 
-  hls.on(Hls.Events.FRAG_LOADED, (_event, data) => {
-    if (data.stats && data.stats.loaded > 0 && data.stats.loading) {
-      const duration = (data.stats.loading.end - data.stats.loading.start) / 1000;
-      if (duration > 0) measuredBandwidth = Math.round(data.stats.loaded / duration);
+  hls.on(Hls.Events.FRAG_BUFFERED, (_event, data) => {
+    if (data.stats && data.stats.bwEstimate) {
+      measuredBandwidth = data.stats.bwEstimate; // bits/sec, pre-computed by HLS.js
     }
   });
 
