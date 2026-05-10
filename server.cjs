@@ -4848,8 +4848,16 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
         }
 
         const fetchProtocol = targetUrl.startsWith('https') ? https : http;
+        const parsedUrl = new URL(targetUrl);
 
-        fetchProtocol.get(targetUrl, (imageRes) => {
+        const options = {
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port || undefined,
+          path: parsedUrl.pathname + parsedUrl.search,
+          headers: { 'User-Agent': 'ViniPlay/1.0' },
+        };
+
+        fetchProtocol.get(options, (imageRes) => {
             // Follow redirects
             if ([301, 302, 307, 308].includes(imageRes.statusCode)) {
                 const location = imageRes.headers.location;
