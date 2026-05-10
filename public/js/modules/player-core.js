@@ -112,13 +112,13 @@ function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered,
   hls.on(Hls.Events.MANIFEST_PARSED, () => {
     const level = hls.levels[hls.currentLevel] || hls.levels[0];
     if (level) {
-      currentVideoCodec = getCodecName(level.videoCodec);
-      currentAudioCodec = getCodecName(level.audioCodec);
+      currentVideoCodec = level.videoCodec ? getCodecName(level.videoCodec) : 'HLS';
+      currentAudioCodec = level.audioCodec ? getCodecName(level.audioCodec) : 'HLS';
     }
     if (hls.audioTracks && hls.audioTracks.length > 0) {
       const at = hls.audioTracks[hls.audioTrack] || hls.audioTracks[0];
-      if (at) {
-        currentAudioCodec = getCodecName(at.audioCodec) || currentAudioCodec;
+      if (at && at.audioCodec) {
+        currentAudioCodec = getCodecName(at.audioCodec);
       }
     }
     video.play().catch(() => {});
@@ -130,14 +130,15 @@ function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered,
 
   hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
     const level = hls.levels[data.level];
-    if (level) {
-      currentVideoCodec = getCodecName(level.videoCodec) || currentVideoCodec;
+    if (level && level.videoCodec) {
+      currentVideoCodec = getCodecName(level.videoCodec);
     }
   });
 
   hls.on(Hls.Events.FRAG_LOADED, (_event, data) => {
-    if (data.stats && data.stats.total > 0 && data.stats.loaded > 0) {
-      measuredBandwidth = Math.round(data.stats.loaded / (data.stats.total / 1000)); // bytes/s
+    if (data.stats && data.stats.loaded > 0 && data.stats.loading) {
+      const duration = (data.stats.loading.end - data.stats.loading.start) / 1000;
+      if (duration > 0) measuredBandwidth = Math.round(data.stats.loaded / duration);
     }
   });
 
