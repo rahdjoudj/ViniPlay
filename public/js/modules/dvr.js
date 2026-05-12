@@ -372,7 +372,7 @@ export function setupDvrEventListeners() {
 
         if (button.classList.contains('timeshift-play-btn')) {
             const jobId = button.dataset.jobId;
-            const job = dvrState.scheduledJobs.find(j => j.id == jobId);
+            const job = dvrState.scheduledJobs.find(j => j.id === Number(jobId));
             if (job) {
                 playTimeshiftStream(job);
             }
@@ -381,7 +381,7 @@ export function setupDvrEventListeners() {
             const bufferedStartIso = button.dataset.programStart;
 
             const jobId = button.closest('tr')?.dataset.jobId;
-            const job = dvrState.scheduledJobs.find(j => j.id == jobId);
+            const job = dvrState.scheduledJobs.find(j => j.id === Number(jobId));
 
             if (!job) {
                 console.error(`[DVR_DEBUG] Could not find job with ID ${jobId} in state.`);
@@ -413,7 +413,7 @@ export function setupDvrEventListeners() {
             });
         } else if (button.classList.contains('view-error-btn')) {
             const jobId = button.dataset.jobId;
-            const job = dvrState.scheduledJobs.find(j => j.id == jobId);
+            const job = dvrState.scheduledJobs.find(j => j.id === Number(jobId));
             if (job) {
                 UIElements.dvrErrorModalTitle.textContent = `Error for: ${job.programTitle}`;
                 UIElements.dvrErrorModalContent.textContent = job.errorMessage || 'No details.';
@@ -421,7 +421,7 @@ export function setupDvrEventListeners() {
             }
         } else if (button.classList.contains('edit-job-btn')) {
             const jobId = button.dataset.jobId;
-            const job = dvrState.scheduledJobs.find(j => j.id == jobId);
+            const job = dvrState.scheduledJobs.find(j => j.id === Number(jobId));
             if (job) {
                 UIElements.dvrEditModalTitle.textContent = `Edit: ${job.programTitle}`;
                 UIElements.dvrEditId.value = job.id;

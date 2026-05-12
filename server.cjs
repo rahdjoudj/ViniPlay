@@ -3563,44 +3563,6 @@ app.head('/stream', allowLocalOrAuth, async (req, res) => {
 });
 
 // ============================================================
-// CAST: Generate authentication token for Chromecast
-// ============================================================
-app.post('/api/cast/generate-token', requireAuth, (req, res) => {
-    try {
-        const { streamUrl } = req.body;
-        const userId = req.session.userId;
-
-        if (!streamUrl) {
-            return res.status(400).json({ error: 'streamUrl is required' });
-        }
-
-        // Generate secure random token
-        const token = crypto.randomBytes(32).toString('hex');
-        const expiresAt = Date.now() + (5 * 60 * 1000); // 5 minutes
-
-        // Store token
-        activeCastTokens.set(token, {
-            userId,
-            streamUrl,
-            expiresAt,
-            createdAt: Date.now()
-        });
-
-        // Auto-cleanup after expiry
-        setTimeout(() => {
-            activeCastTokens.delete(token);
-            console.log(`[CAST_TOKEN] Token expired and removed: ${token.substring(0, 8)}...`);
-        }, 5 * 60 * 1000);
-
-        console.log(`[CAST_TOKEN] Generated token for user ${userId}, expires in 5 minutes`);
-
-        res.json({ token });
-    } catch (error) {
-        console.error('[CAST_TOKEN] Error generating token:', error);
-        res.status(500).json({ error: 'Failed to generate cast token' });
-    }
-});
-
 // ============================================================
 // STREAM STOP: Manually stop a stream
 // ============================================================
@@ -4013,61 +3975,6 @@ app.post('/api/admin/broadcast', requireAuth, requireAdmin, (req, res) => {
 });
 
 // ... existing Multi-View Layout API Endpoints ...
-app.get('/api/multiview/layouts', requireAuth, (req, res) => {
-    console.log(`[LAYOUT_API] Fetching layouts for user ${req.session.userId}.`);
-    db.all("SELECT id, name, layout_data FROM multiview_layouts WHERE user_id = ?", [req.session.userId], (err, rows) => {
-        if (err) {
-            console.error('[LAYOUT_API] Error fetching layouts:', err.message);
-            return res.status(500).json({ error: 'Could not retrieve layouts.' });
-        }
-        const layouts = rows.map(row => ({
-            ...row,
-            layout_data: JSON.parse(row.layout_data)
-        }));
-        console.log(`[LAYOUT_API] Found ${layouts.length} layouts for user ${req.session.userId}.`);
-        res.json(layouts);
-    });
-});
-
-app.post('/api/multiview/layouts', requireAuth, (req, res) => {
-    const { name, layout_data } = req.body;
-    console.log(`[LAYOUT_API] Saving layout "${name}" for user ${req.session.userId}.`);
-    if (!name || !layout_data) {
-        console.warn('[LAYOUT_API] Save failed: Name or layout_data is missing.');
-        return res.status(400).json({ error: 'Layout name and data are required.' });
-    }
-
-    const layoutJson = JSON.stringify(layout_data);
-
-    db.run("INSERT INTO multiview_layouts (user_id, name, layout_data) VALUES (?, ?, ?)",
-        [req.session.userId, name, layoutJson],
-        function (err) {
-            if (err) {
-                console.error('[LAYOUT_API] Error saving layout:', err.message);
-                return res.status(500).json({ error: 'Could not save layout.' });
-            }
-            console.log(`[LAYOUT_API] Layout "${name}" saved with ID ${this.lastID} for user ${req.session.userId}.`);
-            res.status(201).json({ success: true, id: this.lastID, name, layout_data });
-        }
-    );
-});
-
-app.delete('/api/multiview/layouts/:id', requireAuth, (req, res) => {
-    const { id } = req.params;
-    console.log(`[LAYOUT_API] Deleting layout ID: ${id} for user ${req.session.userId}.`);
-    db.run("DELETE FROM multiview_layouts WHERE id = ? AND user_id = ?", [id, req.session.userId], function (err) {
-        if (err) {
-            console.error(`[LAYOUT_API] Error deleting layout ${id}:`, err.message);
-            return res.status(500).json({ error: 'Could not delete layout.' });
-        }
-        if (this.changes === 0) {
-            console.warn(`[LAYOUT_API] Layout ${id} not found or user ${req.session.userId} not authorized.`);
-            return res.status(404).json({ error: 'Layout not found or you do not have permission to delete it.' });
-        }
-        console.log(`[LAYOUT_API] Layout ${id} deleted successfully.`);
-        res.json({ success: true });
-    });
-});
 // --- Notification Scheduler ---
 // ... existing checkAndSendNotifications ...
 async function checkAndSendNotifications() {
@@ -4439,14 +4346,38 @@ app.get('/api/dvr/timeshift/:jobId', requireAuth, requireDvrAccess, (req, res) =
         }
 
         console.log(`[DVR_TIMESHIFT] Streaming file: ${job.filePath}`);
-        res.setHeader('Content-Type', 'video/mp2t');
-        const stream = fs.createReadStream(job.filePath);
-        stream.pipe(res);
+        const stat = fs.statSync(job.filePath);
+        const fileSize = stat.size;
+        const range = req.headers.range;
 
-        stream.on('error', (streamErr) => {
-            console.error(`[DVR_TIMESHIFT] Error streaming file ${job.filePath}:`, streamErr);
-            res.end();
-        });
+        res.setHeader('Content-Type', 'video/mp2t');
+        res.setHeader('Accept-Ranges', 'bytes');
+
+        if (range) {
+            const parts = range.replace(/bytes=/, '').split('-');
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+            const chunkSize = (end - start) + 1;
+
+            res.status(206);
+            res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+            res.setHeader('Content-Length', chunkSize);
+
+            const stream = fs.createReadStream(job.filePath, { start, end });
+            stream.pipe(res);
+            stream.on('error', (streamErr) => {
+                console.error(`[DVR_TIMESHIFT] Error streaming file ${job.filePath}:`, streamErr);
+                res.end();
+            });
+        } else {
+            res.setHeader('Content-Length', fileSize);
+            const stream = fs.createReadStream(job.filePath);
+            stream.pipe(res);
+            stream.on('error', (streamErr) => {
+                console.error(`[DVR_TIMESHIFT] Error streaming file ${job.filePath}:`, streamErr);
+                res.end();
+            });
+        }
     });
 });
 
@@ -4832,309 +4763,13 @@ app.get('/api/public-ip', requireAuth, (req, res) => {
     });
 });
 
-// --- Image Proxy Endpoint (for VOD posters) ---
-// Proxies HTTP/HTTPS images to avoid mixed content warnings
-// Now with server-side disk caching for performance
-app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
-    const imageUrl = req.query.url;
+// [ROUTES MOVED TO ESM: /api/image-proxy, /api/settings/export, /api/settings/import, /api/logs/*]
 
-    if (!imageUrl) {
-        return res.status(400).send('Missing url parameter');
-    }
-
-    // Validate URL
-    try {
-        new URL(imageUrl);
-    } catch (err) {
-        return res.status(400).send('Invalid URL');
-    }
-
-    // Generate a cache filename based on the URL hash
-    const urlHash = crypto.createHash('sha256').update(imageUrl).digest('hex');
-    const cacheFilePath = path.join(IMAGE_CACHE_DIR, urlHash);
-    const cacheMetaPath = path.join(IMAGE_CACHE_DIR, `${urlHash}.meta`);
-
-    // Check if image exists in cache
-    if (fs.existsSync(cacheFilePath) && fs.existsSync(cacheMetaPath)) {
-        try {
-            const meta = JSON.parse(fs.readFileSync(cacheMetaPath, 'utf-8'));
-            console.log(`[IMAGE_PROXY] Serving from cache: ${imageUrl}`);
-
-            // Set headers from cached metadata
-            res.setHeader('Content-Type', meta.contentType);
-            res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days for cached images
-            res.setHeader('X-Cache', 'HIT');
-
-            // Stream cached file
-            const fileStream = fs.createReadStream(cacheFilePath);
-            fileStream.pipe(res);
-
-            fileStream.on('error', (err) => {
-                console.error(`[IMAGE_PROXY] Error reading cached file:`, err.message);
-                // If cache is corrupted, delete and fall through to fetch
-                try {
-                    fs.unlinkSync(cacheFilePath);
-                    fs.unlinkSync(cacheMetaPath);
-                } catch (e) { }
-                res.status(500).send('Cache read error');
-            });
-
-            return;
-        } catch (err) {
-            console.error(`[IMAGE_PROXY] Error reading cache metadata:`, err.message);
-            // Fall through to fetch fresh
-        }
-    }
-
-    console.log(`[IMAGE_PROXY] Fetching and caching image: ${imageUrl}`);
-
-    function fetchImage(targetUrl, redirects = 0) {
-        if (redirects > 5) {
-            return res.status(400).send('Too many redirects');
-        }
-
-        const fetchProtocol = targetUrl.startsWith('https') ? https : http;
-        const parsedUrl = new URL(targetUrl);
-
-        const options = {
-          hostname: parsedUrl.hostname,
-          port: parsedUrl.port || undefined,
-          path: parsedUrl.pathname + parsedUrl.search,
-          headers: { 'User-Agent': 'ViniPlay/1.0' },
-        };
-
-        fetchProtocol.get(options, (imageRes) => {
-            // Follow redirects
-            if ([301, 302, 307, 308].includes(imageRes.statusCode)) {
-                const location = imageRes.headers.location;
-                if (!location) return res.status(400).send('Redirect without location');
-                const resolved = new URL(location, targetUrl).toString();
-                return fetchImage(resolved, redirects + 1);
-            }
-
-            const contentType = imageRes.headers['content-type'];
-            if (!contentType || !contentType.startsWith('image/')) {
-                console.error(`[IMAGE_PROXY] Non-image response — status: ${imageRes.statusCode}, content-type: ${contentType}, url: ${targetUrl}`);
-                return res.status(400).send('URL does not point to an image');
-            }
-
-        // Set response headers
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days
-        res.setHeader('X-Cache', 'MISS');
-
-        // Create write stream to save to cache
-        const fileStream = fs.createWriteStream(cacheFilePath);
-
-        // Pipe to both cache and response
-        imageRes.pipe(fileStream);
-        imageRes.pipe(res);
-
-        // Save metadata when done
-        fileStream.on('finish', () => {
-            const meta = {
-                url: imageUrl,
-                contentType: contentType,
-                cachedAt: new Date().toISOString()
-            };
-            try {
-                fs.writeFileSync(cacheMetaPath, JSON.stringify(meta, null, 2));
-                console.log(`[IMAGE_PROXY] Cached image: ${urlHash}`);
-            } catch (err) {
-                console.error(`[IMAGE_PROXY] Failed to write cache metadata:`, err.message);
-            }
-        });
-
-        fileStream.on('error', (err) => {
-            console.error(`[IMAGE_PROXY] Error writing to cache:`, err.message);
-            // Continue serving even if cache write fails
-        });
-
-    }).on('error', (err) => {
-        console.error(`[IMAGE_PROXY] Error fetching image from ${targetUrl}:`, err.message);
-        res.status(500).send('Failed to fetch image');
-    });
-  }
-
-  fetchImage(imageUrl);
-});
-
-
-// --- Backup & Restore Endpoints ---
-const settingsUpload = multer({
-    storage: multer.diskStorage({
-        destination: (req, file, cb) => cb(null, DATA_DIR),
-        filename: (req, file, cb) => cb(null, 'settings.tmp.json')
-    }),
-    fileFilter: (req, file, cb) => {
-        if (file.mimetype === 'application/json') {
-            cb(null, true);
-        } else {
-            cb(new Error('Invalid file type. Only JSON is allowed.'), false);
-        }
-    }
-});
-
-app.get('/api/settings/export', requireAdmin, (req, res) => {
-    if (fs.existsSync(SETTINGS_PATH)) {
-        res.download(SETTINGS_PATH, 'viniplay-settings-backup.json', (err) => {
-            if (err) {
-                console.error('[SETTINGS_EXPORT] Error sending settings file:', err);
-            }
-        });
-    } else {
-        res.status(404).json({ error: 'Settings file not found.' });
-    }
-});
-
-app.post('/api/settings/import', requireAdmin, settingsUpload.single('settingsFile'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No settings file was uploaded.' });
-    }
-    const tempPath = path.join(DATA_DIR, 'settings.tmp.json');
-    try {
-        const fileContent = fs.readFileSync(tempPath, 'utf-8');
-        JSON.parse(fileContent); // Validate that it's valid JSON
-        fs.renameSync(tempPath, SETTINGS_PATH);
-        console.log('[SETTINGS_IMPORT] Settings file imported successfully. App will now use new settings.');
-        res.json({ success: true, message: 'Settings imported. The application will use them on next load.' });
-    } catch (error) {
-        console.error('[SETTINGS_IMPORT] Error processing imported settings file:', error.message);
-        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-        res.status(400).json({ error: `Invalid settings file. Error: ${error.message}` });
-    }
-});
-// --- LOG MANAGEMENT API ENDPOINTS ---
-
-/**
- * GET /api/logs/info
- * Returns statistics about current log files.
- */
-app.get('/api/logs/info', requireAuth, requireAdmin, (req, res) => {
-    try {
-        const logFiles = fs.readdirSync(LOGS_DIR)
-            .filter(file => file.startsWith('viniplay-') && file.endsWith('.log'))
-            .map(file => {
-                const filePath = path.join(LOGS_DIR, file);
-                const stats = fs.statSync(filePath);
-                return {
-                    name: file,
-                    size: stats.size,
-                    mtime: stats.mtime
-                };
-            })
-            .sort((a, b) => b.mtime - a.mtime);
-
-        const totalSize = logFiles.reduce((sum, file) => sum + file.size, 0);
-        const oldestFile = logFiles.length > 0 ? logFiles[logFiles.length - 1] : null;
-
-        res.json({
-            fileCount: logFiles.length,
-            totalSize: totalSize,
-            oldestDate: oldestFile ? oldestFile.mtime : null,
-            files: logFiles
-        });
-    } catch (error) {
-        console.error('[API] Error getting log info:', error);
-        res.status(500).json({ error: 'Failed to get log information.' });
-    }
-});
-
-/**
- * GET /api/logs/download
- * Downloads all log files combined into a single text file.
- */
-app.get('/api/logs/download', requireAuth, requireAdmin, (req, res) => {
-    try {
-        const logFiles = fs.readdirSync(LOGS_DIR)
-            .filter(file => file.startsWith('viniplay-') && file.endsWith('.log'))
-            .map(file => ({
-                name: file,
-                path: path.join(LOGS_DIR, file),
-                mtime: fs.statSync(path.join(LOGS_DIR, file)).mtime
-            }))
-            .sort((a, b) => a.mtime - b.mtime); // Sort by oldest first
-
-        if (logFiles.length === 0) {
-            return res.status(404).json({ error: 'No log files found.' });
-        }
-
-        // Combine all log files
-        let combinedLogs = `ViniPlay Application Logs\n`;
-        combinedLogs += `Generated: ${new Date().toISOString()}\n`;
-        combinedLogs += `Total Files: ${logFiles.length}\n`;
-        combinedLogs += `${'='.repeat(80)}\n\n`;
-
-        logFiles.forEach(file => {
-            combinedLogs += `\n${'='.repeat(80)}\n`;
-            combinedLogs += `File: ${file.name}\n`;
-            combinedLogs += `Modified: ${file.mtime.toISOString()}\n`;
-            combinedLogs += `${'='.repeat(80)}\n\n`;
-
-            try {
-                const content = fs.readFileSync(file.path, 'utf-8');
-                combinedLogs += content;
-                combinedLogs += '\n\n';
-            } catch (err) {
-                combinedLogs += `[ERROR] Could not read file: ${err.message}\n\n`;
-            }
-        });
-
-        const filename = `viniplay-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
-        res.setHeader('Content-Type', 'text/plain');
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-        res.send(combinedLogs);
-
-        console.log(`[API] User ${req.session.userId} downloaded logs.`);
-    } catch (error) {
-        console.error('[API] Error downloading logs:', error);
-        res.status(500).json({ error: 'Failed to download logs.' });
-    }
-});
-
-/**
- * POST /api/logs/cleanup
- * Deletes all log files.
- */
-app.post('/api/logs/cleanup', requireAuth, requireAdmin, (req, res) => {
-    try {
-        const logFiles = fs.readdirSync(LOGS_DIR)
-            .filter(file => file.startsWith('viniplay-') && file.endsWith('.log'));
-
-        let deletedCount = 0;
-        logFiles.forEach(file => {
-            try {
-                fs.unlinkSync(path.join(LOGS_DIR, file));
-                deletedCount++;
-            } catch (err) {
-                console.error(`[API] Error deleting log file ${file}:`, err);
-            }
-        });
-
-        // Close current log stream and reset
-        if (currentLogStream) {
-            currentLogStream.end();
-            currentLogStream = null;
-        }
-        currentLogFilePath = null;
-        currentLogSize = 0;
-
-        console.log(`[API] User ${req.session.userId} cleared ${deletedCount} log files.`);
-        res.json({ success: true, deletedCount });
-    } catch (error) {
-        console.error('[API] Error cleaning up logs:', error);
-        res.status(500).json({ error: 'Failed to cleanup logs.' });
-    }
-});
-
-// --- Main Route Handling ---
-app.get('*', (req, res) => {
-    const filePath = path.join(PUBLIC_DIR, req.path);
-    if (fs.existsSync(filePath) && fs.lstatSync(filePath).isFile()) {
-        return res.sendFile(filePath);
-    }
-    res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
-});
+// --- CAST endpoint moved to src/routes/cast.js ---
+// --- IMAGE_PROXY endpoint moved to src/routes/image-proxy.js ---
+// --- SETTINGS import/export moved to src/routes/settings-io.js ---
+// --- LOGS endpoints moved to src/routes/logs.js ---
+// --- MULTIVIEW endpoints moved to src/routes/multiview.js ---
 
 // --- Server Start ---
 // When loaded as a module, export the app and skip listen.

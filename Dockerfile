@@ -19,11 +19,17 @@ RUN apt-get update && \
 WORKDIR /usr/src/app
 COPY package*.json ./
 
-# Install production dependencies only
-RUN npm install --omit=dev
+# Install all dependencies (including dev for esbuild)
+RUN npm install
 
 # Copy application source
 COPY . .
+
+# Build frontend bundle
+RUN npm run build:frontend
+
+# Prune dev dependencies for final image
+RUN npm prune --omit=dev
 
 # ---
 
