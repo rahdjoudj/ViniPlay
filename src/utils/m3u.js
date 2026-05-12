@@ -1,11 +1,4 @@
-// Legacy bridge module — all routes extracted to src/routes/, init to src/app.js.
-// Provides parseM3U for ESM modules that still reference it.
-
-const app = require('express')();
-
-module.exports = app;
-
-function parseM3U(data) {
+export function parseM3U(data) {
     if (!data) return [];
     const lines = data.split('\n');
     const channels = [];
@@ -39,5 +32,3 @@ function parseM3U(data) {
     }
     return channels;
 }
-
-app._parseM3U = parseM3U;

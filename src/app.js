@@ -11,6 +11,7 @@ import { logger } from './config/logger.js';
 import { env, DATA_DIR, DVR_DIR, PUBLIC_DIR, SOURCES_DIR, RAW_CACHE_DIR, LOGS_DIR, IMAGE_CACHE_DIR, VAPID_KEYS_PATH, SETTINGS_PATH } from './config/index.js';
 import { applySecurityMiddleware } from './middleware/security.js';
 import { requireAuth, requireAdmin } from './middleware/auth.js';
+import { parseM3U } from './utils/m3u.js';
 
 const require = createRequire(import.meta.url);
 const app = express();
@@ -185,14 +186,10 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', version: '0.12.0', uptime: process.uptime() });
 });
 
-// --- Mount legacy server.js routes (everything not yet extracted) ---
-// Must be required BEFORE creating DVR routes to access parseM3U
-const legacyApp = require('../server.cjs');
-legacyApp._getSettings = getSettings;
-legacyApp._saveSettings = saveSettings;
-shared.parseM3U = legacyApp._parseM3U;
+// --- Add parseM3U to shared state for route modules ---
+shared.parseM3U = parseM3U;
 
-// --- Mount DVR routes (after legacy load for parseM3U, before legacy mount for priority) ---
+// --- Mount DVR routes ---
 const { createDvrRoutes } = await import('./routes/dvr.js');
 const dvrRoutes = createDvrRoutes(shared);
 app.use('/api', dvrRoutes);
@@ -226,11 +223,8 @@ app.delete('/api/data', requireAdmin, (_req, res) => {
   }
 });
 
-app.use(legacyApp);
-
 const hlsCleanup = streamRoutes.killAllHlsStreams;
 const dvrShutdown = () => {
-  if (legacyApp._shutdownDvr) legacyApp._shutdownDvr();
   for (const [, pid] of dvrRoutes.engine.runningFFmpegProcesses) {
     try { process.kill(pid, 'SIGTERM'); } catch {}
   }
