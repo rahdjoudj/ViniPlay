@@ -160,6 +160,7 @@ const { createSettingsIoRoutes } = await import('./routes/settings-io.js');
 const { createMultiviewRoutes } = await import('./routes/multiview.js');
 const { createStreamMgmtRoutes } = await import('./routes/stream-mgmt.js');
 const { createAdminRoutes } = await import('./routes/admin.js');
+const { createSourceRoutes } = await import('./routes/sources.js');
 
 app.use('/api/auth', createAuthRoutes(shared));
 app.use('/api/users', createUserRoutes(shared));
@@ -174,6 +175,7 @@ app.use('/api', createSettingsIoRoutes());
 app.use('/api/multiview', createMultiviewRoutes(shared));
 app.use('/api', createStreamMgmtRoutes(shared));
 app.use('/api', createAdminRoutes(shared));
+app.use('/api/sources', createSourceRoutes(shared));
 const streamRoutes = createStreamRoutes(shared);
 app.use('/stream', streamRoutes);
 app.use('/api/stream', streamRoutes);
