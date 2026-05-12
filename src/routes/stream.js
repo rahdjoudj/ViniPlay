@@ -4,7 +4,8 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../config/logger.js';
-import { DATA_DIR } from '../config/index.js';
+import { DATA_DIR, LIVE_CHANNELS_M3U_PATH } from '../config/index.js';
+import { broadcastAdminUpdate } from './_sse-utils.js';
 
 const HLS_DIR = path.join(DATA_DIR, 'hls');
 const HLS_SEGMENT_TIME = 2;
@@ -13,7 +14,7 @@ const HLS_LIST_SIZE = 5;
 // Track active HLS streams: streamKey -> { ffmpeg, url, userId, createdAt, references }
 const hlsStreams = new Map();
 
-export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sseClients }) {
+export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sseClients, activeRedirectStreams, activeCastTokens, parseM3U }) {
   const router = Router();
 
   function broadcastAdminActivity() {
@@ -244,5 +245,137 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
   });
 
   router.killAllHlsStreams = killAllHlsStreams;
+
+  // --- Legacy ffmpeg stream proxy (GET /stream) ---
+  router.get('/', (req, res, next) => {
+    const { url: streamUrl, profileId, userAgentId, vodName, vodLogo, castToken } = req.query;
+
+    // Allow cast token auth
+    if (castToken) {
+      const td = activeCastTokens?.get(castToken);
+      if (!td || td.expiresAt < Date.now()) {
+        if (td) activeCastTokens?.delete(castToken);
+        return res.status(401).send('Invalid or expired cast token');
+      }
+      req.session = req.session || {};
+      req.session.userId = td.userId;
+      req.session.username = 'Cast User';
+    }
+
+    if (!req.session?.userId) {
+      const ip = (req.clientIp || req.ip || '').split(',')[0].trim();
+      const isLocal = ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.16.');
+      if (!isLocal) return res.status(401).json({ error: 'Authentication required.' });
+      req.session = req.session || {};
+      req.session.userId = -1;
+      req.session.username = 'Local';
+    }
+
+    const userId = req.session.userId;
+    const username = req.session.username;
+    const streamKey = `${userId}::${streamUrl}::${profileId}`;
+
+    const existing = activeStreamProcesses.get(streamKey);
+    if (existing) {
+      existing.references++;
+      existing.lastAccess = Date.now();
+      existing.process.stdout.pipe(res);
+      req.on('close', () => {
+        existing.references--;
+        existing.lastAccess = Date.now();
+      });
+      return;
+    }
+
+    if (!streamUrl) return res.status(400).send('Error: url query parameter is required.');
+
+    const settings = getSettings();
+    let profile = (settings.streamProfiles || []).find(p => p.id === profileId)
+      || (settings.castProfiles || []).find(p => p.id === profileId);
+    if (!profile) return res.status(404).send(`Stream profile "${profileId}" not found.`);
+
+    if (profile.command === 'redirect') return res.redirect(302, streamUrl);
+
+    const userAgent = (settings.userAgents || []).find(ua => ua.id === userAgentId);
+    if (!userAgent) return res.status(404).send(`User agent "${userAgentId}" not found.`);
+
+    let channelName, channelId, channelLogo;
+    if (vodName) {
+      channelName = vodName; channelLogo = vodLogo || null; channelId = null;
+    } else {
+      const m3uContent = fs.existsSync(LIVE_CHANNELS_M3U_PATH) ? fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8') : '';
+      const allChannels = parseM3U(m3uContent);
+      const ch = allChannels.find(c => c.url === streamUrl);
+      channelName = ch ? (ch.displayName || ch.name) : 'Direct Stream';
+      channelId = ch ? ch.id : null;
+      channelLogo = ch ? ch.logo : null;
+    }
+    const streamProfileName = profile.name || 'Unknown Profile';
+
+    const commandTemplate = `-v level+${settings.playerLogLevel} ` + profile.command
+      .replace(/{streamUrl}/g, streamUrl)
+      .replace(/{userAgent}|{clientUserAgent}/g, userAgent.value);
+    const args = (commandTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(a => a.replace(/^"|"$/g, ''));
+
+    logger.info({ streamKey, args: args.join(' ') }, 'Starting legacy ffmpeg stream');
+    const ffmpeg = spawn('ffmpeg', args);
+    const startTime = new Date().toISOString();
+
+    // Log stream history (non-critical, fire and forget)
+    try {
+      const result = db.prepare(
+        "INSERT INTO stream_history (user_id, username, channel_id, channel_name, start_time, status, client_ip, channel_logo, stream_profile_name) VALUES (?, ?, ?, ?, ?, 'playing', ?, ?, ?)"
+      ).run(userId, username, channelId, channelName, startTime, req.clientIp, channelLogo, streamProfileName);
+      const historyId = result.lastInsertRowid;
+
+      const info = {
+        process: ffmpeg, references: 1, lastAccess: Date.now(),
+        userId, username, channelId, channelName, channelLogo,
+        streamProfileName, startTime, historyId,
+        clientIp: req.clientIp, streamKey, isTranscoded: true,
+      };
+      activeStreamProcesses.set(streamKey, info);
+      broadcastAdminUpdate(sseClients, activeStreamProcesses, activeRedirectStreams);
+    } catch {}
+
+    if (profile.command.includes('-f mp4')) res.setHeader('Content-Type', 'video/mp4');
+    else res.setHeader('Content-Type', 'video/mp2t');
+
+    ffmpeg.stdout.pipe(res);
+    ffmpeg.stderr.on('data', (data) => logger.debug({ streamKey, ffmpeg: data.toString().trim().slice(0, 200) }));
+
+    const cleanup = () => {
+      const info = activeStreamProcesses.get(streamKey);
+      if (info?.historyId) {
+        const endTime = new Date().toISOString();
+        const duration = Math.round((new Date(endTime).getTime() - new Date(info.startTime).getTime()) / 1000);
+        db.prepare("UPDATE stream_history SET end_time = ?, duration_seconds = ?, status = 'stopped' WHERE id = ? AND status = 'playing'").run(endTime, duration, info.historyId);
+      }
+      activeStreamProcesses.delete(streamKey);
+      broadcastAdminUpdate(sseClients, activeStreamProcesses, activeRedirectStreams);
+    };
+
+    ffmpeg.on('close', (code) => { cleanup(); if (!res.headersSent) res.status(500).send('FFmpeg ended unexpectedly.'); else res.end(); });
+    ffmpeg.on('error', (err) => { logger.error({ streamKey, err }); cleanup(); if (!res.headersSent) res.status(500).send('Failed to start streaming.'); });
+
+    req.on('close', () => {
+      const info = activeStreamProcesses.get(streamKey);
+      if (info) { info.references--; info.lastAccess = Date.now(); }
+    });
+  });
+
+  // HEAD probe for Shaka Player
+  router.head('/', (req, res) => {
+    const { profileId } = req.query;
+    const settings = getSettings();
+    const profile = (settings.streamProfiles || []).find(p => p.id === profileId)
+      || (settings.castProfiles || []).find(p => p.id === profileId);
+    if (!profile) return res.status(404).end();
+    if (profile.command.includes('-f mp4')) res.setHeader('Content-Type', 'video/mp4');
+    else res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Type, Content-Length');
+    res.status(200).end();
+  });
   return router;
 }
