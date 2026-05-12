@@ -196,6 +196,10 @@ const dvrRoutes = createDvrRoutes(shared);
 app.use('/api', dvrRoutes);
 app.use('/dvr', dvrRoutes);
 
+// --- Mount VOD routes ---
+const { createVodRoutes } = await import('./routes/vod.js');
+app.use('/api', createVodRoutes(shared));
+
 // Load and schedule pending DVR jobs on startup
 db.prepare("UPDATE dvr_jobs SET status = 'error', errorMessage = 'Server restarted during recording.' WHERE status = 'recording'").run();
 const pendingJobs = db.prepare("SELECT * FROM dvr_jobs WHERE status = 'scheduled'").all();
