@@ -1621,25 +1621,567 @@ async function processAndMergeSources(req) {
     return { success: true, message: 'Sources merged successfully.', updatedSettings: settings };
 }
 
-// [ROUTE MOVED TO ESM] GET /api/auth/needs-setup
+// ... existing helper functions ...
 
-// [ROUTE MOVED TO ESM] POST /api/auth/setup-admin
+// --- Authentication API Endpoints ---
+app.get('/api/auth/needs-setup', (req, res) => {
+    console.log('[AUTH_API] Received request for /api/auth/needs-setup');
+    db.get("SELECT COUNT(*) as count FROM users WHERE isAdmin = 1", [], (err, row) => {
+        if (err) {
+            console.error('[AUTH_API] Error checking admin user count:', err.message);
+            return res.status(500).json({ error: err.message });
+        }
+        const needsSetup = row.count === 0;
+        console.log(`[AUTH_API] Admin user count: ${row.count}. Needs setup: ${needsSetup}`);
+        res.json({ needsSetup });
+    });
+});
 
-// [ROUTE MOVED TO ESM] POST /api/auth/login
+app.post('/api/auth/setup-admin', (req, res) => {
+    console.log('[AUTH_API] Received request for /api/auth/setup-admin');
+    db.get("SELECT COUNT(*) as count FROM users", [], (err, row) => {
+        if (err) {
+            console.error('[AUTH_API] Error checking user count during admin setup:', err.message);
+            return res.status(500).json({ error: err.message });
+        }
+        if (row.count > 0) {
+            console.warn('[AUTH_API] Setup attempted but users already exist. Denying setup.');
+            return res.status(403).json({ error: "Setup has already been completed." });
+        }
 
-// [ROUTE MOVED TO ESM] POST /api/auth/logout
+        const { username, password } = req.body;
+        if (!username || !password) {
+            console.warn('[AUTH_API] Admin setup failed: Username and/or password missing.');
+            return res.status(400).json({ error: "Username and password are required." });
+        }
 
-// [ROUTE MOVED TO ESM] POST /api/sources/fetch-groups
+        bcrypt.hash(password, saltRounds, (err, hash) => {
+            if (err) {
+                console.error('[AUTH_API] Error hashing password during admin setup:', err);
+                return res.status(500).json({ error: 'Error hashing password.' });
+            }
+            db.run("INSERT INTO users (username, password, isAdmin, canUseDvr) VALUES (?, ?, 1, 1)", [username, hash], function (err) {
+                if (err) {
+                    console.error('[AUTH_API] Error inserting admin user:', err.message);
+                    return res.status(500).json({ error: err.message });
+                }
+                req.session.userId = this.lastID;
+                req.session.username = username;
+                req.session.isAdmin = true;
+                req.session.canUseDvr = true;
+                console.log(`[AUTH_API] Admin user "${username}" created successfully (ID: ${this.lastID}). Session set.`);
+                res.json({ success: true, user: { id: this.lastID, username: req.session.username, isAdmin: req.session.isAdmin, canUseDvr: req.session.canUseDvr } });
+            });
+        });
+    });
+});
 
-// [ROUTE MOVED TO ESM] GET /api/auth/status
-// [ROUTE MOVED TO ESM] GET /api/users
+app.post('/api/auth/login', (req, res) => {
+    console.log('[AUTH_API] Received request for /api/auth/login');
+    const { username, password } = req.body;
+    db.get("SELECT * FROM users WHERE username = ?", [username], (err, user) => {
+        if (err) {
+            console.error('[AUTH_API] Error querying user during login:', err.message);
+            return res.status(500).json({ error: err.message });
+        }
+        if (!user) {
+            console.warn(`[AUTH_API] Login failed for username "${username}": User not found.`);
+            return res.status(401).json({ error: "Invalid username or password." });
+        }
 
-// [ROUTE MOVED TO ESM] POST /api/users
+        bcrypt.compare(password, user.password, (err, result) => {
+            if (err) {
+                console.error('[AUTH_API] Error comparing password hash:', err);
+                return res.status(500).json({ error: 'Authentication error.' });
+            }
+            if (result) {
+                req.session.userId = user.id;
+                req.session.username = user.username;
+                req.session.isAdmin = user.isAdmin === 1;
+                req.session.canUseDvr = user.canUseDvr === 1;
+                console.log(`[AUTH_API] User "${username}" (ID: ${user.id}) logged in successfully. Session set.`);
+                res.json({
+                    success: true,
+                    user: { id: user.id, username: user.username, isAdmin: user.isAdmin === 1, canUseDvr: user.canUseDvr === 1 }
+                });
+            } else {
+                console.warn(`[AUTH_API] Login failed for username "${username}": Incorrect password.`);
+                res.status(401).json({ error: "Invalid username or password." });
+            }
+        });
+    });
+});
 
-// [ROUTE MOVED TO ESM] PUT /api/users/:id
+app.post('/api/auth/logout', (req, res) => {
+    console.log('[AUTH_API] Received request for /api/auth/logout');
+    const username = req.session.username || 'unknown';
+    req.session.destroy(err => {
+        if (err) {
+            console.error(`[AUTH_API] Error destroying session for user ${username}:`, err);
+            return res.status(500).json({ error: 'Could not log out.' });
+        }
+        res.clearCookie('connect.sid');
+        console.log(`[AUTH_API] User ${username} logged out. Session destroyed.`);
+        res.json({ success: true });
+    });
+});
 
-// [ROUTE MOVED TO ESM] DELETE /api/users/:id
-// [ROUTE MOVED TO ESM] GET /api/config
+// --- NEW/OPTIMIZED ENDPOINT FOR GROUP FILTERING (with Caching & Refresh) ---
+app.post('/api/sources/fetch-groups', requireAuth, async (req, res) => {
+    // --- ADDITION: Get refresh flag from query or body ---
+    const forceRefresh = req.query.refresh === 'true' || req.body.refresh === true;
+    const { type, url, xc, sourceId } = req.body; // Added sourceId
+    // --- END ADDITION ---
+
+    let fetchUrl;
+    let fetchOptions = {};
+    let content = '';
+    let usedCache = false; // Flag to track if cache was used
+
+    console.log(`[API_GROUPS] Fetching groups for type: ${type}, SourceID: ${sourceId}, Refresh: ${forceRefresh}`);
+
+    try {
+        let sourceToUse = null;
+        if (sourceId) {
+            const settings = getSettings();
+            // Try finding in M3U sources first, then EPG (though unlikely for M3U groups)
+            sourceToUse = settings.m3uSources.find(s => s.id === sourceId) || settings.epgSources.find(s => s.id === sourceId);
+        }
+
+        // --- START CACHE CHECK ---
+        if (!forceRefresh && sourceToUse && sourceToUse.cachedRawPath && fs.existsSync(sourceToUse.cachedRawPath)) {
+            try {
+                console.log(`[API_GROUPS] Using cached raw file: ${sourceToUse.cachedRawPath}`);
+                content = fs.readFileSync(sourceToUse.cachedRawPath, 'utf-8');
+                usedCache = true;
+            } catch (cacheReadError) {
+                console.warn(`[API_GROUPS] Failed to read cache file ${sourceToUse.cachedRawPath}. Will fetch fresh. Error:`, cacheReadError.message);
+                usedCache = false; // Ensure we fetch fresh if cache read fails
+            }
+        }
+        // --- END CACHE CHECK ---
+
+        // --- Fetch if cache wasn't used or refresh was forced ---
+        if (type === 'xc' && xc) {
+            const xcInfo = JSON.parse(xc);
+            if (!xcInfo.server || !xcInfo.username || !xcInfo.password) {
+                return res.status(400).json({ error: 'XC source requires server, username, and password.' });
+            }
+            console.log('[API_GROUPS] Source is XC type. Using XtreamClient to fetch all categories.');
+            const settings = getSettings();
+            const activeUserAgent = settings.userAgents.find(ua => ua.id === settings.activeUserAgentId)?.value || 'VLC/3.0.20 (Linux; x86_64)';
+            const client = new XtreamClient(xcInfo.server, xcInfo.username, xcInfo.password, activeUserAgent);
+            const allCategories = await client.getAllCategories();
+            return res.json({ success: true, groups: allCategories, usedCache: false });
+        }
+
+        if (!usedCache) {
+            console.log(`[API_GROUPS] ${forceRefresh ? 'Refresh forced' : 'Cache not used/found'}. Fetching from original source.`);
+            if (type === 'url' && url) {
+                fetchUrl = url;
+                content = await fetchUrlContent(fetchUrl, fetchOptions);
+            } else if (type === 'file' && url) { // Assuming url holds file path for type file
+                const filePath = sourceToUse?.path || path.join(SOURCES_DIR, path.basename(url)); // Prefer path from settings if available
+                if (fs.existsSync(filePath)) {
+                    content = fs.readFileSync(filePath, 'utf-8');
+                } else {
+                    return res.status(400).json({ error: 'File source path not found or invalid.' });
+                }
+            } else {
+                return res.status(400).json({ error: 'Valid source details (URL, XC, or File path) are required.' });
+            }
+        }
+        // --- End Fetch Logic ---
+
+
+        // --- Efficiently Extract Groups (Handles JSON for XC and Regex for M3U) ---
+        const groups = new Set();
+        try {
+            // First, try to parse as JSON (for XC sources which return a JSON array of categories)
+            const groupJsonArray = JSON.parse(content);
+            console.log(`[API_GROUPS] Successfully parsed content as JSON. Scanning for group titles.`);
+            if (Array.isArray(groupJsonArray)) {
+                for (const category of groupJsonArray) {
+                    if (category && typeof category.category_name === 'string') {
+                        const groupName = category.category_name.trim();
+                        if (groupName) groups.add(groupName);
+                    }
+                }
+            }
+        } catch (jsonError) {
+            // If JSON parsing fails, assume it's a plain M3U file and use regex
+            console.log(`[API_GROUPS] Content is not valid JSON, attempting to parse as plain M3U.`);
+            const groupTitleRegex = /group-title=\"([^\"]+)\"/g;
+            let match;
+            while ((match = groupTitleRegex.exec(content)) !== null) {
+                const groupName = match[1].trim();
+                if (groupName) {
+                    groups.add(groupName);
+                }
+            }
+        }
+
+        const sortedGroups = Array.from(groups).sort((a, b) => a.localeCompare(b));
+        console.log(`[API_GROUPS] Found ${sortedGroups.length} unique groups.`);
+        res.json({ success: true, groups: sortedGroups, usedCache: usedCache }); // Optionally tell frontend if cache was used
+
+    } catch (error) {
+        console.error(`[API_GROUPS] Failed to fetch or parse M3U for groups: ${error.message}`);
+        res.status(500).json({ error: `Failed to fetch or process groups: ${error.message}` });
+    }
+});
+
+app.get('/api/auth/status', (req, res) => {
+    console.log(`[AUTH_API] GET /api/auth/status - Checking session ID: ${req.sessionID}`);
+    if (req.session && req.session.userId) {
+        console.log(`[AUTH_API_STATUS] Valid session found for user "${req.session.username}" (ID: ${req.session.userId}). Responding with isLoggedIn: true.`);
+        res.json({ isLoggedIn: true, user: { id: req.session.userId, username: req.session.username, isAdmin: req.session.isAdmin, canUseDvr: req.session.canUseDvr } });
+    } else {
+        console.log('[AUTH_API_STATUS] No valid session found. Responding with isLoggedIn: false.');
+        res.json({ isLoggedIn: false });
+    }
+});
+// ... existing User Management API Endpoints ...
+app.get('/api/users', requireAdmin, (req, res) => {
+    console.log('[USER_API] Fetching all users.');
+    db.all("SELECT id, username, isAdmin, canUseDvr, allowed_sources FROM users ORDER BY username", [], (err, rows) => {
+        if (err) {
+            console.error('[USER_API] Error fetching users:', err.message);
+            return res.status(500).json({ error: err.message });
+        }
+        console.log(`[USER_API] Found ${rows.length} users.`);
+        res.json(rows);
+    });
+});
+
+app.post('/api/users', requireAdmin, (req, res) => {
+    console.log('[USER_API] Adding new user.');
+    const { username, password, isAdmin, canUseDvr, allowed_sources } = req.body;
+    if (!username || !password) {
+        console.warn('[USER_API] Add user failed: Username and/or password missing.');
+        return res.status(400).json({ error: "Username and password are required." });
+    }
+
+    bcrypt.hash(password, saltRounds, (err, hash) => {
+        if (err) {
+            console.error('[USER_API] Error hashing password for new user:', err);
+            return res.status(500).json({ error: 'Error hashing password' });
+        }
+        const allowedSourcesStr = allowed_sources ? JSON.stringify(allowed_sources) : null;
+        db.run("INSERT INTO users (username, password, isAdmin, canUseDvr, allowed_sources) VALUES (?, ?, ?, ?, ?)", [username, hash, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, allowedSourcesStr], function (err) {
+            if (err) {
+                console.error('[USER_API] Error inserting new user:', err.message);
+                return res.status(400).json({ error: "Username already exists." });
+            }
+            console.log(`[USER_API] User "${username}" added successfully (ID: ${this.lastID}).`);
+            res.json({ success: true, id: this.lastID });
+        });
+    });
+});
+
+app.put('/api/users/:id', requireAdmin, (req, res) => {
+    const { id } = req.params;
+    const { username, password, isAdmin, canUseDvr, allowed_sources } = req.body;
+    console.log(`[USER_API] Updating user ID: ${id}. Username: ${username}, IsAdmin: ${isAdmin}, CanUseDvr: ${canUseDvr}`);
+
+    const allowedSourcesStr = allowed_sources ? JSON.stringify(allowed_sources) : null;
+
+    const updateUser = () => {
+        if (password) {
+            bcrypt.hash(password, saltRounds, (err, hash) => {
+                if (err) {
+                    console.error('[USER_API] Error hashing password during user update:', err);
+                    return res.status(500).json({ error: 'Error hashing password' });
+                }
+                db.run("UPDATE users SET username = ?, password = ?, isAdmin = ?, canUseDvr = ?, allowed_sources = ? WHERE id = ?", [username, hash, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, allowedSourcesStr, id], (err) => {
+                    if (err) {
+                        console.error(`[USER_API] Error updating user ${id} with new password:`, err.message);
+                        return res.status(500).json({ error: err.message });
+                    }
+                    if (req.session.userId == id) {
+                        req.session.username = username;
+                        req.session.isAdmin = isAdmin;
+                        req.session.canUseDvr = canUseDvr;
+                        console.log(`[USER_API] Current user's session (ID: ${id}) updated.`);
+                    }
+                    console.log(`[USER_API] User ${id} updated successfully (with password change).`);
+                    res.json({ success: true });
+                });
+            });
+        } else {
+            db.run("UPDATE users SET username = ?, isAdmin = ?, canUseDvr = ?, allowed_sources = ? WHERE id = ?", [username, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, allowedSourcesStr, id], (err) => {
+                if (err) {
+                    console.error(`[USER_API] Error updating user ${id} without password change:`, err.message);
+                    return res.status(500).json({ error: err.message });
+                }
+                if (req.session.userId == id) {
+                    req.session.username = username;
+                    req.session.isAdmin = isAdmin;
+                    req.session.canUseDvr = canUseDvr;
+                    console.log(`[USER_API] Current user's session (ID: ${id}) updated.`);
+                }
+                console.log(`[USER_API] User ${id} updated successfully (without password change).`);
+                res.json({ success: true });
+            });
+        }
+    };
+
+    if (req.session.userId == id && !isAdmin) {
+        console.log(`[USER_API] Attempting to demote current admin user ${id}. Checking if last admin.`);
+        db.get("SELECT COUNT(*) as count FROM users WHERE isAdmin = 1", [], (err, row) => {
+            if (err) {
+                console.error('[USER_API] Error checking admin count for demotion:', err.message);
+                return res.status(500).json({ error: err.message });
+            }
+            if (row.count <= 1) {
+                console.warn(`[USER_API] Cannot demote user ${id}: They are the last administrator.`);
+                return res.status(403).json({ error: "Cannot remove the last administrator." });
+            }
+            updateUser();
+        });
+    } else {
+        updateUser();
+    }
+});
+
+// MODIFIED: User deletion now terminates active streams and forces logout.
+app.delete('/api/users/:id', requireAdmin, (req, res) => {
+    const idToDelete = parseInt(req.params.id, 10);
+    console.log(`[USER_API] Deleting user ID: ${idToDelete}`);
+    if (req.session.userId == idToDelete) {
+        console.warn(`[USER_API] Attempted to delete own account for user ${idToDelete}.`);
+        return res.status(403).json({ error: "You cannot delete your own account." });
+    }
+
+    // --- NEW: Terminate active streams for the deleted user ---
+    let streamsKilled = 0;
+    for (const [streamKey, streamInfo] of activeStreamProcesses.entries()) {
+        if (streamInfo.userId === idToDelete) {
+            console.log(`[USER_DELETION] Found active stream for deleted user ${idToDelete}. Terminating PID: ${streamInfo.process.pid}.`);
+            try {
+                streamInfo.process.kill('SIGKILL');
+                activeStreamProcesses.delete(streamKey);
+                streamsKilled++;
+            } catch (e) {
+                console.warn(`[USER_DELETION] Error killing stream process for user ${idToDelete}: ${e.message}`);
+            }
+        }
+    }
+    if (streamsKilled > 0) {
+        console.log(`[USER_DELETION] Terminated ${streamsKilled} active stream(s) for deleted user ${idToDelete}.`);
+    }
+
+    // --- NEW: Force logout via SSE ---
+    sendSseEvent(idToDelete, 'force-logout', { reason: 'Your account has been deleted by an administrator.' });
+
+    db.run("DELETE FROM users WHERE id = ?", idToDelete, function (err) {
+        if (err) {
+            console.error(`[USER_API] Error deleting user ${idToDelete}:`, err.message);
+            return res.status(500).json({ error: err.message });
+        }
+        if (this.changes === 0) {
+            console.warn(`[USER_API] User ${idToDelete} not found for deletion.`);
+            return res.status(404).json({ error: 'User not found.' });
+        }
+        console.log(`[USER_API] User ${idToDelete} deleted successfully from database.`);
+        res.json({ success: true });
+    });
+});
+// --- Protected IPTV API Endpoints ---
+app.get('/api/config', requireAuth, async (req, res) => {
+    try {
+        // ADDED vodMovies and vodSeries
+        let config = { m3uContent: null, epgContent: null, settings: {}, vodMovies: [], vodSeries: [] };
+        let globalSettings = getSettings();
+        config.settings = globalSettings;
+
+        // FETCH USER PERMISSIONS
+        let allowedSources = null;
+        try {
+            const user = await dbGet(db, "SELECT allowed_sources, username FROM users WHERE id = ?", [req.session.userId]);
+            if (user) {
+                console.log(`[DEBUG_API_CONFIG] Fetching config for UserID: ${req.session.userId} (Session: ${req.sessionID})`);
+                if (user.allowed_sources) {
+                    allowedSources = JSON.parse(user.allowed_sources);
+                    console.log(`[DEBUG_API_CONFIG] DB allowed_sources for user '${user.username}':`, JSON.stringify(allowedSources, null, 2));
+                } else {
+                    console.log(`[DEBUG_API_CONFIG] No allowed_sources found for user '${user.username}' (admin/full access).`);
+                }
+            }
+        } catch (dbErr) {
+            console.error("[API] Error fetching user permissions:", dbErr);
+        }
+
+        // LOAD M3U
+        if (fs.existsSync(LIVE_CHANNELS_M3U_PATH)) {
+            let m3uRaw = fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8');
+
+            // FILTER M3U
+            if (allowedSources) {
+                const lines = m3uRaw.split('\n');
+                let filteredLines = [];
+                if (lines.length > 0 && lines[0].startsWith('#EXTM3U')) {
+                    filteredLines.push(lines[0]);
+                }
+
+                let currentExtInf = null;
+                const groupTitleRegex = /group-title="([^"]*)"/;
+
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i].trim();
+                    if (line.startsWith('#EXTINF:')) {
+                        currentExtInf = line;
+
+                        // Extract Source ID we injected earlier: tvg-id="sourceId_..."
+                        const tvgIdMatch = line.match(/tvg-id="([^"]*)"/);
+                        let isAllowed = false;
+
+                        if (tvgIdMatch) {
+                            const fullId = tvgIdMatch[1];
+                            const underscoreIndex = fullId.indexOf('_');
+                            if (underscoreIndex !== -1) {
+                                const sourceId = fullId.substring(0, underscoreIndex);
+                                // Check if this source is in allowedSources
+                                if (allowedSources[sourceId]) {
+                                    // Check if specifically allowed (if we use { allowed: true }) or just presence
+                                    // Assuming format: { "sourceId": { allowed: true, groups: [] } }
+                                    if (allowedSources[sourceId].allowed) {
+                                        isAllowed = true;
+                                        // Check Group Restrictions
+                                        const groups = allowedSources[sourceId].groups;
+                                        if (groups && groups.length > 0) {
+                                            const groupMatch = line.match(groupTitleRegex);
+                                            const group = groupMatch ? groupMatch[1] : 'Uncategorized';
+                                            if (!groups.includes(group)) {
+                                                isAllowed = false;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!isAllowed) {
+                            currentExtInf = null;
+                        }
+
+                    } else if (line.startsWith('http') || (line.startsWith('/') && !line.startsWith('//'))) { // URL or local path
+                        if (currentExtInf) {
+                            filteredLines.push(currentExtInf);
+                            filteredLines.push(line);
+                        }
+                        currentExtInf = null;
+                    }
+                }
+                config.m3uContent = filteredLines.join('\n');
+                console.log(`[API] Loaded and FILTERED M3U content for user ${req.session.username}.`);
+            } else {
+                config.m3uContent = m3uRaw;
+                console.log(`[API] Loaded M3U content from ${LIVE_CHANNELS_M3U_PATH}.`);
+            }
+        } else {
+            console.log(`[API] No merged M3U file found at ${LIVE_CHANNELS_M3U_PATH}.`);
+        }
+
+        // LOAD EPG
+        if (fs.existsSync(LIVE_EPG_JSON_PATH)) {
+            try {
+                const fullEpg = JSON.parse(fs.readFileSync(LIVE_EPG_JSON_PATH, 'utf-8'));
+                if (allowedSources) {
+                    const filteredEpg = {};
+                    for (const channelId in fullEpg) {
+                        const underscoreIndex = channelId.indexOf('_');
+                        if (underscoreIndex !== -1) {
+                            const sourceId = channelId.substring(0, underscoreIndex);
+                            if (allowedSources[sourceId] && allowedSources[sourceId].allowed) {
+                                // For EPG, we can't easily filter by group unless we look up the channel's group from M3U
+                                // But EPG entries don't have group info. 
+                                // However, the frontend matches EPG to M3U channels. 
+                                // If M3U channel is hidden, EPG doesn't matter much, but good to filter for payload size.
+                                // Limiting factor: We don't know the group here easily without re-parsing M3U or having a mapping.
+                                // DECISION: Filter EPG by Source ID only. Granular group filtering happens naturally because the M3U won't have the channel.
+                                filteredEpg[channelId] = fullEpg[channelId];
+                            }
+                        }
+                    }
+                    config.epgContent = filteredEpg;
+                    console.log(`[API] Loaded and FILTERED EPG content for user ${req.session.username}.`);
+                } else {
+                    config.epgContent = fullEpg;
+                    console.log(`[API] Loaded EPG content from ${LIVE_EPG_JSON_PATH}.`);
+                }
+            } catch (parseError) {
+                console.error(`[API] Error parsing merged EPG JSON from ${LIVE_EPG_JSON_PATH}: ${parseError.message}`);
+                config.epgContent = {};
+            }
+        } else {
+            console.log(`[API] No merged EPG JSON file found at ${LIVE_EPG_JSON_PATH}.`);
+        }
+
+        // --- NEW: Load VOD Files (Legacy) ---
+        // VOD filtering is complex here as it uses legacy JSON files. 
+        // We will assume VOD is handled by the new /api/vod/library endpoint properly.
+        // But to be safe, we can clear these if legacy mode is active and user is restricted.
+        // For now, loading as is, but frontend uses the library endpoint.
+
+        if (fs.existsSync(VOD_MOVIES_JSON_PATH)) {
+            // ... legacy code kept simple
+            try {
+                config.vodMovies = JSON.parse(fs.readFileSync(VOD_MOVIES_JSON_PATH, 'utf-8'));
+            } catch (e) { }
+        }
+        if (fs.existsSync(VOD_SERIES_JSON_PATH)) {
+            try {
+                config.vodSeries = JSON.parse(fs.readFileSync(VOD_SERIES_JSON_PATH, 'utf-8'));
+            } catch (e) { }
+        }
+        // --- END NEW VOD ---
+
+        db.all(`SELECT key, value FROM user_settings WHERE user_id = ?`, [req.session.userId], (err, rows) => {
+            if (err) {
+                console.error("[API] Error fetching user settings:", err);
+                return res.status(200).json(config);
+            }
+            if (rows) {
+                const userSettings = {};
+                rows.forEach(row => {
+                    try {
+                        userSettings[row.key] = JSON.parse(row.value);
+                    } catch (e) {
+                        userSettings[row.key] = row.value;
+                        console.warn(`[API] User setting key "${row.key}" could not be parsed as JSON. Storing as raw string.`);
+                    }
+                });
+
+                config.settings = { ...config.settings, ...userSettings };
+                console.log(`[API] Merged user settings for user ID: ${req.session.userId}`);
+            }
+
+            // --- CACHE INVALIDATION LOGIC ---
+            // Calculate a signature for the user's permissions to force cache updates
+            let userPermissionsSignature = 'default';
+            if (allowedSources) {
+                const str = JSON.stringify(allowedSources);
+                let hash = 0;
+                for (let i = 0; i < str.length; i++) {
+                    const char = str.charCodeAt(i);
+                    hash = ((hash << 5) - hash) + char;
+                    hash = hash & hash; // Convert to 32bit integer
+                }
+                userPermissionsSignature = 'v1_' + hash;
+            }
+            config.settings.userPermissionsSignature = userPermissionsSignature;
+            console.log(`[API] Serving config with permissions signature: ${userPermissionsSignature}`);
+            // --------------------------------
+
+            res.status(200).json(config);
+        });
+
+    } catch (error) {
+        console.error("[API] Error reading config or related files:", error);
+        res.status(500).json({ error: "Could not load configuration from server." });
+    }
+});
 
 // --- NEW: VOD Library Endpoint (Reads from DB and builds URLs) ---
 app.get('/api/vod/library', requireAuth, async (req, res) => {
@@ -2438,20 +2980,259 @@ app.post('/api/process-sources', requireAuth, async (req, res) => {
 });
 
 
-// [ROUTE MOVED TO ESM] POST /api/save/settings
-// [ROUTE MOVED TO ESM] POST /api/user/settings
-// [ROUTE MOVED TO ESM] GET /api/notifications/vapid-public-key
+app.post('/api/save/settings', requireAuth, async (req, res) => {
+    console.log('[API] Received request to /api/save/settings.');
+    try {
+        let currentSettings = getSettings();
 
-// [ROUTE MOVED TO ESM] POST /api/notifications/subscribe
+        const oldTimezone = currentSettings.timezoneOffset;
 
-// [ROUTE MOVED TO ESM] POST /api/notifications/unsubscribe
+        const updatedSettings = { ...currentSettings };
+        for (const key in req.body) {
+            if (!['favorites', 'playerDimensions', 'programDetailsDimensions', 'recentChannels', 'multiviewLayouts'].includes(key)) {
+                updatedSettings[key] = req.body[key];
+            } else {
+                console.warn(`[SETTINGS_SAVE] Attempted to save user-specific key "${key}" to global settings. This is ignored.`);
+            }
+        }
 
-// [ROUTE MOVED TO ESM] POST /api/notifications
-// [ROUTE MOVED TO ESM] GET /api/notifications
+        saveSettings(updatedSettings);
 
-// [ROUTE MOVED TO ESM] DELETE /api/notifications/past
+        if (updatedSettings.timezoneOffset !== oldTimezone) {
+            console.log("[API] Timezone setting changed, re-processing sources.");
+            const result = await processAndMergeSources();
+            if (result.success) {
+                fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
+            }
+        }
 
-// [ROUTE MOVED TO ESM] DELETE /api/notifications/:id
+        res.json({ success: true, message: 'Settings saved.', settings: getSettings() });
+    } catch (error) {
+        console.error("[API] Error saving global settings:", error);
+        res.status(500).json({ error: "Could not save settings. Check server logs." });
+    }
+});
+// ... existing endpoint ...
+app.post('/api/user/settings', requireAuth, (req, res) => {
+    const { key, value } = req.body;
+    const userId = req.session.userId;
+    console.log(`[API] Saving user setting for user ${userId}: ${key}`);
+
+    if (!key) {
+        return res.status(400).json({ error: 'A setting key is required.' });
+    }
+
+    const valueJson = JSON.stringify(value);
+
+    const saveAndRespond = () => {
+        let globalSettings = getSettings();
+        db.all(`SELECT key, value FROM user_settings WHERE user_id = ?`, [userId], (err, rows) => {
+            if (err) {
+                console.error("[API] Error re-fetching user settings after save:", err);
+                return res.status(500).json({ error: 'Could not retrieve updated settings.' });
+            }
+            const userSettings = {};
+            rows.forEach(row => {
+                try { userSettings[row.key] = JSON.parse(row.value); }
+                catch (e) { userSettings[row.key] = row.value; }
+            });
+
+            const finalSettings = { ...globalSettings, ...userSettings };
+            res.json({ success: true, settings: finalSettings });
+        });
+    };
+
+    db.run(
+        `INSERT INTO user_settings (user_id, key, value) VALUES (?, ?, ?)
+         ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`,
+        [userId, key, valueJson],
+        function (err) {
+            if (err) {
+                console.error(`[API] Error saving user setting for user ${userId}, key ${key}:`, err);
+                return res.status(500).json({ error: 'Could not save user setting.' });
+            }
+            console.log(`[API] User setting for user ${userId}, key ${key} saved successfully.`);
+            saveAndRespond();
+        }
+    );
+});
+// --- Notification Endpoints ---
+// ... existing endpoints ...
+app.get('/api/notifications/vapid-public-key', requireAuth, (req, res) => {
+    console.log('[PUSH_API] Request for VAPID public key.');
+    if (!vapidKeys.publicKey) {
+        console.error('[PUSH_API] VAPID public key not available on the server.');
+        return res.status(500).json({ error: 'VAPID public key not available on the server.' });
+    }
+    res.send(vapidKeys.publicKey);
+});
+
+app.post('/api/notifications/subscribe', requireAuth, (req, res) => {
+    console.log(`[PUSH_API] Subscribe request for user ${req.session.userId}.`);
+    const subscription = req.body;
+    const userId = req.session.userId;
+
+    if (!subscription || !subscription.endpoint || !subscription.keys || !subscription.keys.p256dh || !subscription.keys.auth) {
+        console.warn('[PUSH_API] Invalid subscription object received.');
+        return res.status(400).json({ error: 'Invalid subscription object.' });
+    }
+
+    const { endpoint, keys: { p256dh, auth } } = subscription;
+
+    db.run(
+        `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES (?, ?, ?, ?)
+         ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id, p256dh=excluded.p256dh, auth=excluded.auth`,
+        [userId, endpoint, p256dh, auth],
+        function (err) {
+            if (err) {
+                console.error(`[PUSH_API] Error saving push subscription for user ${userId}:`, err);
+                return res.status(500).json({ error: 'Could not save subscription.' });
+            }
+            console.log(`[PUSH] User ${userId} subscribed with endpoint: ${endpoint}. (ID: ${this.lastID || 'existing'})`);
+            res.status(201).json({ success: true });
+        }
+    );
+});
+
+app.post('/api/notifications/unsubscribe', requireAuth, (req, res) => {
+    console.log(`[PUSH_API] Unsubscribe request for user ${req.session.userId}.`);
+    const { endpoint } = req.body;
+    if (!endpoint) {
+        console.warn('[PUSH_API] Unsubscribe failed: Endpoint is required.');
+        return res.status(400).json({ error: 'Endpoint is required to unsubscribe.' });
+    }
+
+    db.run("DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?", [endpoint, req.session.userId], function (err) {
+        if (err) {
+            console.error(`[PUSH_API] Error deleting push subscription for user ${req.session.userId}, endpoint ${endpoint}:`, err);
+            return res.status(500).json({ error: 'Could not unsubscribe.' });
+        }
+        if (this.changes === 0) {
+            console.warn(`[PUSH_API] No subscription found for user ${req.session.userId} with endpoint ${endpoint} for deletion.`);
+            return res.status(404).json({ error: 'Subscription not found or unauthorized.' });
+        }
+        console.log(`[PUSH] User ${req.session.userId} unsubscribed from endpoint: ${endpoint}`);
+        res.json({ success: true });
+    });
+});
+
+app.post('/api/notifications', requireAuth, (req, res) => {
+    const { channelId, channelName, channelLogo, programTitle, programDesc, programStart, programStop, scheduledTime, programId } = req.body;
+    const userId = req.session.userId;
+
+    if (!channelId || !programTitle || !programStart || !scheduledTime || !programId || !channelName) {
+        console.error(`[PUSH_API_ERROR] Add notification failed for user ${userId} due to missing data.`, { body: req.body });
+        return res.status(400).json({ error: 'Invalid notification data. All required fields must be provided.' });
+    }
+
+    console.log(`[PUSH_API] Adding notification for user ${userId}. Program: "${programTitle}", Channel: "${channelName}", Scheduled Time: ${scheduledTime}`);
+
+    db.run(`INSERT INTO notifications (user_id, channelId, channelName, channelLogo, programTitle, programDesc, programStart, programStop, notificationTime, programId, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+        [userId, channelId, channelName, channelLogo || '', programTitle, programDesc || '', programStart, programStop, scheduledTime, programId],
+        function (err) {
+            if (err) {
+                console.error(`[PUSH_API_ERROR] Database error adding notification for user ${userId}:`, err);
+                return res.status(500).json({ error: 'Could not add notification to the database.' });
+            }
+            const notificationId = this.lastID;
+            console.log(`[PUSH_API] Notification added successfully for program "${programTitle}" (DB ID: ${notificationId}) for user ${userId}.`);
+
+            db.all("SELECT id FROM push_subscriptions WHERE user_id = ?", [userId], (subErr, subs) => {
+                if (subErr) {
+                    console.error(`[PUSH_API_ERROR] Could not fetch subscriptions for user ${userId} to create deliveries.`, subErr);
+                    return;
+                }
+                const now = new Date().toISOString();
+                const deliveryStmt = db.prepare("INSERT INTO notification_deliveries (notification_id, subscription_id, status, updatedAt) VALUES (?, ?, 'pending', ?)");
+                subs.forEach(sub => {
+                    deliveryStmt.run(notificationId, sub.id, now);
+                });
+                deliveryStmt.finalize(finalizeErr => {
+                    if (finalizeErr) console.error(`[PUSH_API_ERROR] Error finalizing delivery creation for notification ${notificationId}.`, finalizeErr);
+                    else console.log(`[PUSH_API] Created ${subs.length} delivery records for notification ${notificationId}.`);
+                });
+            });
+
+            res.status(201).json({ success: true, id: notificationId });
+        }
+    );
+});
+app.get('/api/notifications', requireAuth, (req, res) => {
+    console.log(`[PUSH_API] Fetching notifications for user ${req.session.userId}.`);
+    const query = `
+        SELECT
+            n.id,
+            n.user_id,
+            n.channelId,
+            n.channelName,
+            n.channelLogo,
+            n.programTitle,
+            n.programDesc,
+            n.programStart,
+            n.programStop,
+            n.notificationTime as scheduledTime,
+            n.programId,
+            -- Determine the overall status based on its deliveries
+            CASE
+                WHEN (SELECT COUNT(*) FROM notification_deliveries WHERE notification_id = n.id AND status = 'sent') > 0 THEN 'sent'
+                WHEN (SELECT COUNT(*) FROM notification_deliveries WHERE notification_id = n.id AND status = 'expired') > 0 THEN 'expired'
+                ELSE n.status
+            END as status,
+            -- Use the latest delivery update time as the triggeredAt time for consistency
+            (SELECT MAX(updatedAt) FROM notification_deliveries WHERE notification_id = n.id AND status = 'sent') as triggeredAt
+        FROM notifications n
+        WHERE n.user_id = ?
+        ORDER BY n.notificationTime DESC
+    `;
+    db.all(query, [req.session.userId], (err, rows) => {
+        if (err) {
+            console.error('[PUSH_API] Error fetching consolidated notifications from database:', err);
+            return res.status(500).json({ error: 'Could not retrieve notifications.' });
+        }
+        console.log(`[PUSH_API] Found ${rows.length} consolidated notifications for user ${req.session.userId}.`);
+        res.json(rows);
+    });
+});
+
+// MODIFIED: Reordered this route to be BEFORE the /:id route to fix the 404 error.
+app.delete('/api/notifications/past', requireAuth, (req, res) => {
+    const userId = req.session.userId;
+    const now = new Date().toISOString();
+    console.log(`[PUSH_API] Clearing all past notifications for user ${userId}.`);
+
+    // This query deletes notifications whose scheduled trigger time is in the past.
+    db.run(`DELETE FROM notifications WHERE user_id = ? AND notificationTime <= ?`,
+        [userId, now],
+        function (err) {
+            if (err) {
+                console.error(`[PUSH_API] Error deleting past notifications for user ${userId}:`, err.message);
+                return res.status(500).json({ error: 'Could not clear past notifications.' });
+            }
+            console.log(`[PUSH_API] Cleared ${this.changes} past notifications for user ${userId}.`);
+            res.json({ success: true, deletedCount: this.changes });
+        }
+    );
+});
+
+app.delete('/api/notifications/:id', requireAuth, (req, res) => {
+    const { id } = req.params;
+    console.log(`[PUSH_API] Deleting notification ID: ${id} for user ${req.session.userId}.`);
+    db.run(`DELETE FROM notifications WHERE id = ? AND user_id = ?`,
+        [id, req.session.userId],
+        function (err) {
+            if (err) {
+                console.error(`[PUSH_API] Error deleting notification ${id} from database:`, err);
+                return res.status(500).json({ error: 'Could not delete notification.' });
+            }
+            if (this.changes === 0) {
+                console.warn(`[PUSH_API] Notification ${id} not found or unauthorized for user ${req.session.userId}.`);
+                return res.status(404).json({ error: 'Notification not found or unauthorized.' });
+            }
+            console.log(`[PUSH_API] Notification ${id} deleted successfully for user ${req.session.userId}.`);
+            res.json({ success: true });
+        });
+});
 
 app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
     console.log(`[API_RESET] ADMIN ACTION: Received request to /api/data (HARD RESET) from admin ${req.session.username}.`);
@@ -2781,10 +3562,1145 @@ app.head('/stream', allowLocalOrAuth, async (req, res) => {
     res.status(200).end();
 });
 
-// [ROUTES MOVED TO ESM: /api/admin/*, /api/stream/stop, /api/activity/*]
+// ============================================================
+// ============================================================
+// STREAM STOP: Manually stop a stream
+// ============================================================
+app.post('/api/stream/stop', requireAuth, (req, res) => {
+    const { url: streamUrl, profileId } = req.body;
+    let streamKey;
+
+    if (!streamUrl) {
+        return res.status(400).json({ error: "Stream URL is required to stop the stream." });
+    }
+
+    // If profileId is provided, construct the specific key
+    if (profileId) {
+        streamKey = `${req.session.userId}::${streamUrl}::${profileId}`;
+    } else {
+        // If no profileId, try to find a matching key for this user and URL
+        // The key format is either "userId::url" (old) or "userId::url::profileId" (new)
+        const partialKey = `${req.session.userId}::${streamUrl}`;
+
+        // Check for exact match first (legacy format or redirect)
+        if (activeStreamProcesses.has(partialKey)) {
+            streamKey = partialKey;
+        } else {
+            // Search for keys starting with the partial key
+            for (const key of activeStreamProcesses.keys()) {
+                if (key.startsWith(partialKey + '::')) {
+                    streamKey = key;
+                    break; // Stop at the first match
+                }
+            }
+        }
+
+        // If still not found, default to the partial key so the error message is consistent
+        if (!streamKey) {
+            streamKey = partialKey;
+        }
+    }
+
+    const activeStreamInfo = activeStreamProcesses.get(streamKey);
+
+    if (activeStreamInfo) {
+        console.log(`[STREAM_STOP_API] Received request to stop stream for user ${req.session.userId}. Key: ${streamKey}`);
+
+        // --- NEW: Smart Termination Logic ---
+        // If there are other active references (e.g., another device), DO NOT kill the process.
+        if (activeStreamInfo.references > 1) {
+            console.log(`[STREAM_STOP_API] Stream ${streamKey} has ${activeStreamInfo.references} active references. NOT terminating process.`);
+            // We still return success because from the client's perspective, *their* session is done.
+            // The server just keeps the underlying process alive for the other client(s).
+            return res.json({ success: true, message: 'Stream kept alive for other active clients.' });
+        }
+        // --- END NEW ---
+
+        console.log(`[STREAM_STOP_API] No other references. Terminating process for key: ${streamKey}`);
+        try {
+            if (activeStreamInfo.historyId) {
+                const endTime = new Date().toISOString();
+                const duration = Math.round((new Date(endTime).getTime() - new Date(activeStreamInfo.startTime).getTime()) / 1000);
+                db.run("UPDATE stream_history SET end_time = ?, duration_seconds = ?, status = 'stopped' WHERE id = ? AND status = 'playing'",
+                    [endTime, duration, activeStreamInfo.historyId]);
+            }
+            activeStreamInfo.process.kill('SIGKILL');
+            activeStreamProcesses.delete(streamKey);
+            //-- ENHANCEMENT: Notify admins that a stream has ended.
+            broadcastAdminUpdate();
+            console.log(`[STREAM_STOP_API] Successfully terminated process for key: ${streamKey}`);
+        } catch (e) {
+            console.warn(`[STREAM_STOP_API] Could not kill process for key: ${streamKey}. It might have already exited. Error: ${e.message}`);
+        }
+        res.json({ success: true, message: `Stream process for ${streamKey} terminated.` });
+    } else {
+        console.log(`[STREAM_STOP_API] Received stop request for user ${req.session.userId}, but no active stream was found for key (or partial match): ${streamKey}`);
+        res.json({ success: true, message: 'No active stream to stop.' });
+    }
+});
+
+app.post('/api/activity/start-redirect', requireAuth, (req, res) => {
+    const { streamUrl, channelId, channelName, channelLogo } = req.body;
+    const userId = req.session.userId;
+    const username = req.session.username;
+    const clientIp = req.clientIp;
+    const startTime = new Date().toISOString();
+
+    db.run(
+        `INSERT INTO stream_history (user_id, username, channel_id, channel_name, start_time, status, client_ip, channel_logo, stream_profile_name) VALUES (?, ?, ?, ?, ?, 'playing', ?, ?, ?)`,
+        [userId, username, channelId, channelName, startTime, clientIp, channelLogo, 'Redirect'],
+        function (err) {
+            if (err) {
+                console.error('[REDIRECT_LOG] Error logging redirect stream start:', err.message);
+                return res.status(500).json({ error: 'Could not log stream start.' });
+            }
+            const historyId = this.lastID;
+            console.log(`[REDIRECT_LOG] Logged redirect stream start for user ${username} with history ID: ${historyId}`);
+
+            // --- NEW: Add to live tracking ---
+            const streamKey = `${userId}::${historyId}`;
+            activeRedirectStreams.set(streamKey, {
+                streamKey,
+                userId,
+                username,
+                channelId,
+                channelName,
+                channelLogo,
+                streamProfileName: 'Redirect',
+                startTime,
+                clientIp,
+                isTranscoded: false,
+                historyId,
+            });
+            broadcastAdminUpdate(); // Notify admins
+            // --- END NEW ---
+
+            res.status(201).json({ success: true, historyId });
+        }
+    );
+});
+
+app.post('/api/activity/stop-redirect', requireAuth, (req, res) => {
+    const { historyId } = req.body;
+    if (!historyId) {
+        return res.status(400).json({ error: 'History ID is required.' });
+    }
+
+    // --- NEW: Remove from live tracking ---
+    const streamKey = `${req.session.userId}::${historyId}`;
+    if (activeRedirectStreams.has(streamKey)) {
+        activeRedirectStreams.delete(streamKey);
+        broadcastAdminUpdate(); // Notify admins
+    }
+    // --- END NEW ---
+
+    const endTime = new Date().toISOString();
+    db.get("SELECT start_time FROM stream_history WHERE id = ? AND user_id = ?", [historyId, req.session.userId], (err, row) => {
+        if (err || !row) {
+            // Even if history isn't found, we should respond successfully as the client's goal is to stop.
+            return res.status(200).json({ success: true, message: 'Stream stopped, history record not found.' });
+        }
+        const duration = Math.round((new Date(endTime).getTime() - new Date(row.start_time).getTime()) / 1000);
+        db.run("UPDATE stream_history SET end_time = ?, duration_seconds = ?, status = 'stopped' WHERE id = ? AND end_time IS NULL",
+            [endTime, duration, historyId],
+            (updateErr) => {
+                if (updateErr) {
+                    console.error(`[REDIRECT_LOG] Error updating redirect stream end for history ID ${historyId}:`, updateErr.message);
+                    return res.status(500).json({ error: 'Could not log stream end.' });
+                }
+                console.log(`[REDIRECT_LOG] Logged redirect stream end for history ID: ${historyId}`);
+                res.json({ success: true });
+            }
+        );
+    });
+});
+
+// --- NEW: App Version Endpoint ---
+app.get('/api/version', requireAuth, (req, res) => {
+    try {
+        const packageJsonPath = path.join(__dirname, 'package.json');
+        if (fs.existsSync(packageJsonPath)) {
+            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+            res.json({ version: packageJson.version || 'Unknown' });
+        } else {
+            res.json({ version: 'Unknown' });
+        }
+    } catch (error) {
+        console.error('[API] Error reading package.json:', error);
+        res.status(500).json({ error: 'Could not determine app version.' });
+    }
+});
+
+// --- NEW/MODIFIED: Admin Monitoring Endpoints ---
+app.get('/api/admin/activity', requireAuth, requireAdmin, async (req, res) => {
+    // 1. Get Live Activity (already up-to-date in memory)
+    const transcodedLive = Array.from(activeStreamProcesses.values()).map(info => ({
+        streamKey: info.streamKey,
+        userId: info.userId,
+        username: info.username,
+        channelName: info.channelName,
+        channelLogo: info.channelLogo,
+        streamProfileName: info.streamProfileName,
+        startTime: info.startTime,
+        clientIp: info.clientIp,
+        isTranscoded: true,
+    }));
+
+    const redirectLive = Array.from(activeRedirectStreams.values()).map(info => ({
+        streamKey: `${info.userId}::${info.historyId}`,
+        userId: info.userId,
+        username: info.username,
+        channelName: info.channelName,
+        channelLogo: info.channelLogo,
+        streamProfileName: info.streamProfileName,
+        startTime: info.startTime,
+        clientIp: info.clientIp,
+        isTranscoded: false,
+    }));
+
+    const liveActivity = [...transcodedLive, ...redirectLive];
+
+    // 2. Get Paginated and Filtered History
+    try {
+        const page = parseInt(req.query.page, 10) || 1;
+        const pageSize = parseInt(req.query.pageSize, 10) || 25;
+        const search = req.query.search || '';
+        const dateFilter = req.query.dateFilter || 'all';
+        const customStart = req.query.startDate;
+        const customEnd = req.query.endDate;
+
+        const offset = (page - 1) * pageSize;
+
+        let whereClauses = [];
+        let queryParams = [];
+
+        if (search) {
+            whereClauses.push(`(username LIKE ? OR channel_name LIKE ? OR client_ip LIKE ? OR stream_profile_name LIKE ?)`);
+            const searchTerm = `%${search}%`;
+            queryParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
+        }
+
+        const now = new Date();
+        if (dateFilter === '24h') {
+            whereClauses.push(`start_time >= ?`);
+            queryParams.push(new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString());
+        } else if (dateFilter === '7d') {
+            whereClauses.push(`start_time >= ?`);
+            queryParams.push(new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString());
+        } else if (dateFilter === 'custom' && customStart && customEnd) {
+            whereClauses.push(`start_time BETWEEN ? AND ?`);
+            queryParams.push(new Date(customStart).toISOString(), new Date(customEnd).toISOString());
+        }
+
+        const whereString = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+        // Count total items with filters
+        const countResult = await new Promise((resolve, reject) => {
+            db.get(`SELECT COUNT(*) as total FROM stream_history ${whereString}`, queryParams, (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            });
+        });
+        const totalItems = countResult.total;
+
+        // Get paginated items with filters
+        const historyItems = await new Promise((resolve, reject) => {
+            const query = `SELECT * FROM stream_history ${whereString} ORDER BY start_time DESC LIMIT ? OFFSET ?`;
+            db.all(query, [...queryParams, pageSize, offset], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        const history = {
+            items: historyItems,
+            totalItems: totalItems,
+            totalPages: Math.ceil(totalItems / pageSize),
+            currentPage: page,
+            pageSize: pageSize,
+        };
+
+        res.json({ live: liveActivity, history });
+
+    } catch (err) {
+        console.error('[ADMIN_API] Error fetching paginated stream history:', err.message);
+        return res.status(500).json({ error: "Could not retrieve stream history." });
+    }
+});
+
+
+app.post('/api/admin/stop-stream', requireAuth, requireAdmin, (req, res) => {
+    const { streamKey } = req.body;
+    if (!streamKey) {
+        return res.status(400).json({ error: "A streamKey is required to stop the stream." });
+    }
+
+    const streamInfo = activeStreamProcesses.get(streamKey);
+    if (streamInfo) {
+        console.log(`[ADMIN_API] Admin ${req.session.username} is terminating stream ${streamKey} for user ${streamInfo.username}.`);
+        try {
+            if (streamInfo.historyId) {
+                const endTime = new Date().toISOString();
+                const duration = Math.round((new Date(endTime).getTime() - new Date(streamInfo.startTime).getTime()) / 1000);
+                db.run("UPDATE stream_history SET end_time = ?, duration_seconds = ?, status = 'stopped' WHERE id = ? AND status = 'playing'",
+                    [endTime, duration, streamInfo.historyId]);
+            }
+            streamInfo.process.kill('SIGKILL');
+            activeStreamProcesses.delete(streamKey);
+            //-- ENHANCEMENT: Notify admins that a stream has ended.
+            broadcastAdminUpdate();
+            res.json({ success: true, message: `Stream terminated for user ${streamInfo.username}.` });
+        } catch (e) {
+            console.error(`[ADMIN_API] Error terminating stream ${streamKey}: ${e.message}`);
+            res.status(500).json({ error: "Failed to terminate stream process." });
+        }
+    } else {
+        res.status(404).json({ error: "Active stream not found." });
+    }
+});
+
+//-- ENHANCEMENT: New endpoint for admins to change a user's live stream.
+app.post('/api/admin/change-stream', requireAuth, requireAdmin, (req, res) => {
+    // FIX: Parse userId from the request body as an integer to prevent type mismatch.
+    const { userId: userIdString, streamKey, channel } = req.body;
+    const userId = parseInt(userIdString, 10);
+
+    if (!userId || !streamKey || !channel) {
+        return res.status(400).json({ error: "User ID, stream key, and channel data are required." });
+    }
+
+    const streamInfo = activeStreamProcesses.get(streamKey);
+    // The comparison below will now work correctly because userId is a number.
+    if (!streamInfo || streamInfo.userId !== userId) {
+        return res.status(404).json({ error: "The specified stream is not active for this user." });
+    }
+
+    console.log(`[ADMIN_API] Admin ${req.session.username} is changing channel for user ${streamInfo.username} to "${channel.name}".`);
+
+    // Send the change-channel event to the target user's client(s)
+    // Use the parsed numeric userId to find the correct SSE client
+    sendSseEvent(userId, 'change-channel', { channel });
+
+    res.json({ success: true, message: `Change channel command sent to user ${streamInfo.username}.` });
+});
+
+// NEW: Endpoint for system health metrics
+app.get('/api/admin/system-health', requireAuth, requireAdmin, async (req, res) => {
+    try {
+        const [cpu, mem, fs] = await Promise.all([
+            si.currentLoad(),
+            si.mem(),
+            si.fsSize()
+        ]);
+
+        const dataDisk = fs.find(d => d.mount === DATA_DIR) || {};
+        const dvrDisk = fs.find(d => d.mount === DVR_DIR) || {};
+
+        res.json({
+            cpu: {
+                load: cpu.currentLoad.toFixed(2)
+            },
+            memory: {
+                total: mem.total,
+                used: mem.active,
+                percent: ((mem.active / mem.total) * 100).toFixed(2)
+            },
+            disks: {
+                data: {
+                    total: dataDisk.size || 0,
+                    used: dataDisk.used || 0,
+                    percent: dataDisk.use || 0
+                },
+                dvr: {
+                    total: dvrDisk.size || 0,
+                    used: dvrDisk.used || 0,
+                    percent: dvrDisk.use || 0
+                }
+            }
+        });
+    } catch (e) {
+        console.error('[ADMIN_API] Error fetching system health:', e);
+        res.status(500).json({ error: 'Could not retrieve system health information.' });
+    }
+});
+
+// NEW: Endpoint for analytics widgets
+app.get('/api/admin/analytics', requireAuth, requireAdmin, async (req, res) => {
+    try {
+        const topChannelsQuery = `
+            SELECT channel_name, SUM(duration_seconds) as total_duration
+            FROM stream_history
+            WHERE channel_name IS NOT NULL AND duration_seconds IS NOT NULL
+            GROUP BY channel_name
+            ORDER BY total_duration DESC
+            LIMIT 5`;
+
+        const topUsersQuery = `
+            SELECT username, SUM(duration_seconds) as total_duration
+            FROM stream_history
+            WHERE duration_seconds IS NOT NULL
+            GROUP BY username
+            ORDER BY total_duration DESC
+            LIMIT 5`;
+
+        const topChannels = await new Promise((resolve, reject) => {
+            db.all(topChannelsQuery, [], (err, rows) => err ? reject(err) : resolve(rows));
+        });
+
+        const topUsers = await new Promise((resolve, reject) => {
+            db.all(topUsersQuery, [], (err, rows) => err ? reject(err) : resolve(rows));
+        });
+
+        res.json({ topChannels, topUsers });
+
+    } catch (e) {
+        console.error('[ADMIN_API] Error fetching analytics data:', e);
+        res.status(500).json({ error: 'Could not retrieve analytics data.' });
+    }
+});
+
+// NEW: Endpoint for broadcasting messages
+app.post('/api/admin/broadcast', requireAuth, requireAdmin, (req, res) => {
+    const { message } = req.body;
+    if (!message || message.trim().length === 0) {
+        return res.status(400).json({ error: 'Message cannot be empty.' });
+    }
+
+    broadcastSseToAll('broadcast-message', {
+        message: message.trim(),
+        sender: req.session.username,
+    });
+
+    res.json({ success: true, message: 'Broadcast sent successfully.' });
+});
+
+// ... existing Multi-View Layout API Endpoints ...
+// --- Notification Scheduler ---
+// ... existing checkAndSendNotifications ...
+async function checkAndSendNotifications() {
+    console.log('[PUSH_CHECKER] Running scheduled notification check for all devices.');
+    const now = new Date();
+    const nowIso = now.toISOString();
+
+    const timeoutCutoff = new Date(now.getTime() - (24 * 60 * 60 * 1000)).toISOString();
+
+    try {
+        db.run(`
+            UPDATE notification_deliveries
+            SET status = 'expired', updatedAt = ?
+            WHERE status = 'pending' AND notification_id IN (
+                SELECT id FROM notifications WHERE notificationTime < ?
+            )
+        `, [nowIso, timeoutCutoff], function (err) {
+            if (err) {
+                console.error('[PUSH_CHECKER_CLEANUP] Error expiring old notifications:', err.message);
+            } else if (this.changes > 0) {
+                console.log(`[PUSH_CHECKER_CLEANUP] Expired ${this.changes} old notification deliveries.`);
+            }
+        });
+
+        const dueDeliveries = await new Promise((resolve, reject) => {
+            const query = `
+                SELECT
+                    d.id as delivery_id,
+                    d.status,
+                    n.*,
+                    s.id as subscription_id,
+                    s.endpoint,
+                    s.p256dh,
+                    s.auth
+                FROM notification_deliveries d
+                JOIN notifications n ON d.notification_id = n.id
+                JOIN push_subscriptions s ON d.subscription_id = s.id
+                WHERE d.status = 'pending' AND n.notificationTime <= ?
+            `;
+            db.all(query, [nowIso], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        if (dueDeliveries.length > 0) {
+            console.log(`[PUSH_CHECKER] Found ${dueDeliveries.length} due notification deliveries to process.`);
+        } else {
+            return;
+        }
+
+        for (const delivery of dueDeliveries) {
+            console.log(`[PUSH_CHECKER] Processing delivery ID ${delivery.delivery_id} for program "${delivery.programTitle}" to subscription ${delivery.subscription_id}.`);
+
+            const payload = JSON.stringify({
+                type: 'program_reminder',
+                data: {
+                    programTitle: delivery.programTitle,
+                    programStart: delivery.programStart,
+                    channelName: delivery.channelName,
+                    channelLogo: delivery.channelLogo || 'https://i.imgur.com/rwa8SjI.png',
+                    url: `/tvguide?channelId=${delivery.channelId}&programId=${delivery.programId}&programStart=${delivery.programStart}`
+                }
+            });
+
+            const pushSubscription = {
+                endpoint: delivery.endpoint,
+                keys: { p256dh: delivery.p256dh, auth: delivery.auth }
+            };
+
+            const pushOptions = {
+                TTL: 86400 // 24 hours in seconds
+            };
+
+            webpush.sendNotification(pushSubscription, payload, pushOptions)
+                .then(() => {
+                    console.log(`[PUSH_CHECKER] Successfully sent notification for delivery ID ${delivery.delivery_id}.`);
+                    db.run("UPDATE notification_deliveries SET status = 'sent', updatedAt = ? WHERE id = ?", [nowIso, delivery.delivery_id]);
+                })
+                .catch(error => {
+                    console.error(`[PUSH_CHECKER] Error sending notification for delivery ID ${delivery.delivery_id}:`, error.statusCode, error.body || error.message);
+
+                    if (error.statusCode === 410 || error.statusCode === 404) {
+                        console.log(`[PUSH_CHECKER] Subscription ${delivery.subscription_id} is invalid (410/404). Deleting subscription and failing deliveries.`);
+
+                        sendSseEvent(delivery.user_id, 'subscription-invalidated', {
+                            endpoint: delivery.endpoint,
+                            reason: `Push service returned status ${error.statusCode}.`
+                        });
+
+                        db.run("DELETE FROM push_subscriptions WHERE id = ?", [delivery.subscription_id]);
+                        db.run("UPDATE notification_deliveries SET status = 'failed', updatedAt = ? WHERE subscription_id = ? AND status = 'pending'", [nowIso, delivery.subscription_id]);
+                    } else {
+                        db.run("UPDATE notification_deliveries SET status = 'failed', updatedAt = ? WHERE id = ?", [nowIso, delivery.delivery_id]);
+                    }
+                });
+        }
+    } catch (error) {
+        console.error('[PUSH_CHECKER] Unhandled error in checkAndSendNotifications:', error);
+    }
+}
+// --- DVR Engine ---
+// ... existing DVR functions (stopRecording, startRecording, etc.) ...
+function stopRecording(jobId) {
+    const pid = runningFFmpegProcesses.get(jobId);
+    if (pid) {
+        console.log(`[DVR] Gracefully stopping recording for job ${jobId} (PID: ${pid}). Sending SIGINT.`);
+        try {
+            process.kill(pid, 'SIGINT');
+        } catch (e) {
+            console.error(`[DVR] Error sending SIGINT to ffmpeg process for job ${jobId}: ${e.message}. Trying SIGKILL.`);
+            try { process.kill(pid, 'SIGKILL'); } catch (e2) { }
+        }
+    } else {
+        console.warn(`[DVR] Cannot stop job ${jobId}: No running ffmpeg process found.`);
+    }
+}
+
+
+async function startRecording(job) {
+    console.log(`[DVR] Starting recording for job ${job.id}: "${job.programTitle}"`);
+    const settings = getSettings();
+    const allChannels = parseM3U(fs.existsSync(LIVE_CHANNELS_M3U_PATH) ? fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8') : '');
+    const channel = allChannels.find(c => c.id === job.channelId);
+
+    if (!channel) {
+        const errorMsg = `Channel ID ${job.channelId} not found in M3U.`;
+        console.error(`[DVR] Cannot start recording job ${job.id}: ${errorMsg}`);
+        db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [errorMsg, job.id]);
+        return;
+    }
+
+    // MODIFIED: Simplified logic. Directly use the profile ID from the job.
+    const recProfile = (settings.dvr.recordingProfiles || []).find(p => p.id === job.profileId);
+    if (!recProfile) {
+        const errorMsg = `Recording profile ID "${job.profileId}" not found.`;
+        console.error(`[DVR] Cannot start recording job ${job.id}: ${errorMsg}`);
+        db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [errorMsg, job.id]);
+        return;
+    }
+
+    const userAgent = (settings.userAgents || []).find(ua => ua.id === job.userAgentId);
+    if (!userAgent) {
+        const errorMsg = `User agent not found.`;
+        console.error(`[DVR] Cannot start recording job ${job.id}: ${errorMsg}`);
+        db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [errorMsg, job.id]);
+        return;
+    }
+
+    console.log(`[DVR] Using recording profile: "${recProfile.name}"`);
+
+    const streamUrlToRecord = channel.url;
+    // Sanitize URL: must start with http(s):// to prevent ffmpeg argument injection
+    if (!/^https?:\/\/.+/.test(streamUrlToRecord)) {
+        const errorMsg = `Invalid stream URL for channel: ${streamUrlToRecord}`;
+        console.error(`[DVR] Cannot start recording job ${job.id}: ${errorMsg}`);
+        db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [errorMsg, job.id]);
+        return;
+    }
+    // **MODIFIED: Change file extension based on profile to support .ts files.**
+    const fileExtension = recProfile.command.includes('-f mp4') ? '.mp4' : '.ts';
+    const safeFilename = `${job.id}_${job.programTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase()}${fileExtension}`;
+    const fullFilePath = path.join(DVR_DIR, safeFilename);
+
+    // Prefix ffmpeg command with "-v level+{dvrLoglevel}" here to control log spamming.
+    // dvrLogLevel is configured via a settings page pulldown.
+    const commandTemplate = `-v level+${settings.dvrLogLevel} ` + recProfile.command
+        .replace(/{streamUrl}/g, streamUrlToRecord)
+        .replace(/{userAgent}/g, userAgent.value)
+        .replace(/{filePath}/g, fullFilePath);
+
+    const args = (commandTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(arg => arg.replace(/^"|"$/g, ''));
+
+    console.log(`[DVR] Spawning ffmpeg for job ${job.id} with command: ffmpeg ${args.join(' ')}`);
+    const ffmpeg = spawn('ffmpeg', args);
+    runningFFmpegProcesses.set(job.id, ffmpeg.pid);
+
+    db.run("UPDATE dvr_jobs SET status = 'recording', ffmpeg_pid = ?, filePath = ? WHERE id = ?", [ffmpeg.pid, fullFilePath, job.id]);
+
+    let ffmpegErrorOutput = '';
+    ffmpeg.stderr.on('data', (data) => {
+        const line = data.toString().trim();
+        console.log(`[FFMPEG_DVR][${job.id}] ${line}`);
+        ffmpegErrorOutput += line + '\n';
+    });
+
+    ffmpeg.on('close', (code) => {
+        runningFFmpegProcesses.delete(job.id);
+        // MODIFIED: Accept exit code 255 as a graceful exit (standard for SIGINT in ffmpeg)
+        const wasStoppedIntentionally = ffmpegErrorOutput.includes('Exiting normally, received signal 2') || code === 255;
+        const logMessage = (code === 0 || wasStoppedIntentionally) ? 'finished gracefully' : `exited with error code ${code}`;
+        console.log(`[DVR] Recording process for job ${job.id} ("${job.programTitle}") ${logMessage}.`);
+
+        // MODIFIED: Explicitly set file permissions to 0o666 (rw-rw-rw-) so the user can manage the file.
+        try {
+            if (fs.existsSync(fullFilePath)) {
+                fs.chmodSync(fullFilePath, 0o666);
+                console.log(`[DVR] Set permissions to 0o666 for: ${fullFilePath}`);
+            }
+        } catch (chmodErr) {
+            console.error(`[DVR] Failed to set permissions for ${fullFilePath}:`, chmodErr.message);
+        }
+
+        fs.stat(fullFilePath, (statErr, stats) => {
+            if ((code === 0 || wasStoppedIntentionally) && !statErr && stats && stats.size > 1024) {
+                const durationSeconds = (new Date(job.endTime) - new Date(job.startTime)) / 1000;
+                db.run(`INSERT INTO dvr_recordings (job_id, user_id, channelName, programTitle, startTime, durationSeconds, fileSizeBytes, filePath) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [job.id, job.user_id, job.channelName, job.programTitle, job.startTime, Math.round(durationSeconds), stats.size, fullFilePath],
+                    (insertErr) => {
+                        if (insertErr) {
+                            console.error(`[DVR] Failed to create dvr_recordings entry for job ${job.id}:`, insertErr.message);
+                        } else {
+                            console.log(`[DVR] Job ${job.id} logged to completed recordings.`);
+                        }
+                    }
+                );
+                db.run("UPDATE dvr_jobs SET status = 'completed', ffmpeg_pid = NULL WHERE id = ?", [job.id]);
+            } else {
+                const finalErrorMessage = `Recording failed. FFmpeg exit code: ${code}. ${statErr ? 'File stat error: ' + statErr.message : ''}. FFmpeg output: ${ffmpegErrorOutput.slice(-1000)}`;
+                console.error(`[DVR] Recording for job ${job.id} failed. ${finalErrorMessage}`);
+                db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [finalErrorMessage, job.id]);
+                if (!statErr && stats.size <= 1024) {
+                    fs.unlink(fullFilePath, (unlinkErr) => {
+                        if (unlinkErr) console.error(`[DVR] Could not delete failed recording file: ${fullFilePath}`, unlinkErr);
+                    });
+                }
+            }
+        });
+    });
+
+    ffmpeg.on('error', (err) => {
+        const errorMsg = `Failed to spawn ffmpeg process: ${err.message}`;
+        console.error(`[DVR] ${errorMsg} for job ${job.id}`);
+        runningFFmpegProcesses.delete(job.id);
+        db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [errorMsg, job.id]);
+    });
+}
+
+function scheduleDvrJob(job) {
+    if (activeDvrJobs.has(job.id)) {
+        const existing = activeDvrJobs.get(job.id);
+        existing.startJob?.cancel();
+        existing.stopJob?.cancel();
+        activeDvrJobs.delete(job.id);
+    }
+
+    const startTime = new Date(job.startTime);
+    const endTime = new Date(job.endTime);
+    const now = new Date();
+
+    if (endTime <= now) {
+        console.log(`[DVR] Job ${job.id} for "${job.programTitle}" is already in the past. Skipping schedule.`);
+        if (job.status === 'scheduled') {
+            db.run("UPDATE dvr_jobs SET status = 'error', errorMessage = 'Job was scheduled for a time in the past.' WHERE id = ?", [job.id]);
+        }
+        return;
+    }
+
+    const info = {};
+
+    if (startTime > now) {
+        info.startJob = schedule.scheduleJob(startTime, () => startRecording(job));
+        console.log(`[DVR] Scheduled recording start for job ${job.id} at ${startTime}`);
+    } else {
+        startRecording(job);
+    }
+
+    info.stopJob = schedule.scheduleJob(endTime, () => stopRecording(job.id));
+    activeDvrJobs.set(job.id, info);
+    console.log(`[DVR] Scheduled recording stop for job ${job.id} at ${endTime}`);
+}
+
+
+
+// ... existing functions ...
+
+async function checkForConflicts(newJob, userId) {
+    return new Promise((resolve, reject) => {
+        const settings = getSettings();
+        const maxConcurrent = settings.dvr?.maxConcurrentRecordings || 1;
+
+        db.all("SELECT * FROM dvr_jobs WHERE user_id = ? AND status = 'scheduled'", [userId], (err, scheduledJobs) => {
+            if (err) return reject(err);
+
+            const newStart = new Date(newJob.startTime).getTime();
+            const newEnd = new Date(newJob.endTime).getTime();
+
+            const conflictingJobs = scheduledJobs.filter(existingJob => {
+                const existingStart = new Date(existingJob.startTime).getTime();
+                const existingEnd = new Date(existingJob.endTime).getTime();
+                return newStart < existingEnd && newEnd > existingStart;
+            });
+
+            if (conflictingJobs.length >= maxConcurrent) {
+                resolve(conflictingJobs);
+            } else {
+                resolve([]);
+            }
+        });
+    });
+}
+
+async function autoDeleteOldRecordings() {
+    console.log('[DVR_STORAGE] Running daily check for old recordings to delete.');
+    db.all("SELECT id FROM users", [], (err, users) => {
+        if (err) return console.error('[DVR_STORAGE] Could not fetch users for auto-delete check:', err);
+
+        users.forEach(user => {
+            db.get("SELECT value FROM user_settings WHERE user_id = ? AND key = 'dvr'", [user.id], (err, row) => {
+                const settings = getSettings();
+                const userDvrSettings = row ? { ...settings.dvr, ...JSON.parse(row.value) } : settings.dvr;
+
+                const deleteDays = userDvrSettings.autoDeleteDays;
+                if (!deleteDays || deleteDays <= 0) {
+                    return;
+                }
+
+                const cutoffDate = new Date();
+                cutoffDate.setDate(cutoffDate.getDate() - deleteDays);
+
+                db.all("SELECT id, filePath FROM dvr_recordings WHERE user_id = ? AND startTime < ?", [user.id, cutoffDate.toISOString()], (err, recordingsToDelete) => {
+                    if (err) return console.error(`[DVR_STORAGE] Error fetching old recordings for user ${user.id}:`, err);
+                    if (recordingsToDelete.length > 0) {
+                        console.log(`[DVR_STORAGE] Found ${recordingsToDelete.length} old recording(s) to delete for user ${user.id}.`);
+                    }
+
+                    recordingsToDelete.forEach(rec => {
+                        if (fs.existsSync(rec.filePath)) {
+                            fs.unlink(rec.filePath, (unlinkErr) => {
+                                if (unlinkErr) {
+                                    console.error(`[DVR_STORAGE] Failed to delete file ${rec.filePath}:`, unlinkErr);
+                                } else {
+                                    db.run("DELETE FROM dvr_recordings WHERE id = ?", [rec.id]);
+                                    console.log(`[DVR_STORAGE] Deleted old recording file and DB record: ${rec.filePath}`);
+                                }
+                            });
+                        } else {
+                            db.run("DELETE FROM dvr_recordings WHERE id = ?", [rec.id]);
+                        }
+                    });
+                });
+            });
+        });
+    });
+}
+// --- DVR API Endpoints (MODIFIED & NEW) ---
+// ... existing DVR API Endpoints ...
+
+// **NEW: Timeshift/Chase Play Endpoint**
+app.get('/api/dvr/timeshift/:jobId', requireAuth, requireDvrAccess, (req, res) => {
+    const { jobId } = req.params;
+    const userId = req.session.userId;
+    console.log(`[DVR_TIMESHIFT] Received request for job ${jobId} from user ${userId}.`);
+
+    db.get("SELECT filePath, status FROM dvr_jobs WHERE id = ? AND user_id = ?", [jobId, userId], (err, job) => {
+        if (err) {
+            console.error(`[DVR_TIMESHIFT] DB error fetching job ${jobId}:`, err);
+            return res.status(500).send('Server error.');
+        }
+        if (!job) {
+            return res.status(404).send('Recording job not found or not authorized.');
+        }
+        if (job.status !== 'recording') {
+            return res.status(400).send('Cannot timeshift a recording that is not in progress.');
+        }
+        if (!job.filePath || !fs.existsSync(job.filePath)) {
+            return res.status(404).send('Recording file not found on disk.');
+        }
+
+        console.log(`[DVR_TIMESHIFT] Streaming file: ${job.filePath}`);
+        const stat = fs.statSync(job.filePath);
+        const fileSize = stat.size;
+        const range = req.headers.range;
+
+        res.setHeader('Content-Type', 'video/mp2t');
+        res.setHeader('Accept-Ranges', 'bytes');
+
+        if (range) {
+            const parts = range.replace(/bytes=/, '').split('-');
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+            const chunkSize = (end - start) + 1;
+
+            res.status(206);
+            res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+            res.setHeader('Content-Length', chunkSize);
+
+            const stream = fs.createReadStream(job.filePath, { start, end });
+            stream.pipe(res);
+            stream.on('error', (streamErr) => {
+                console.error(`[DVR_TIMESHIFT] Error streaming file ${job.filePath}:`, streamErr);
+                res.end();
+            });
+        } else {
+            res.setHeader('Content-Length', fileSize);
+            const stream = fs.createReadStream(job.filePath);
+            stream.pipe(res);
+            stream.on('error', (streamErr) => {
+                console.error(`[DVR_TIMESHIFT] Error streaming file ${job.filePath}:`, streamErr);
+                res.end();
+            });
+        }
+    });
+});
+
+
+app.post('/api/dvr/schedule', requireAuth, requireDvrAccess, async (req, res) => {
+    const { channelId, channelName, programTitle, programStart, programStop } = req.body;
+    const settings = getSettings();
+    const dvrSettings = settings.dvr || {};
+    const preBuffer = (dvrSettings.preBufferMinutes || 0) * 60 * 1000;
+    const postBuffer = (dvrSettings.postBufferMinutes || 0) * 60 * 1000;
+
+    const newJob = {
+        user_id: req.session.userId,
+        channelId,
+        channelName,
+        programTitle,
+        startTime: new Date(new Date(programStart).getTime() - preBuffer).toISOString(),
+        endTime: new Date(new Date(programStop).getTime() + postBuffer).toISOString(),
+        status: 'scheduled',
+        profileId: dvrSettings.activeRecordingProfileId,
+        userAgentId: settings.activeUserAgentId,
+        preBufferMinutes: dvrSettings.preBufferMinutes || 0,
+        postBufferMinutes: dvrSettings.postBufferMinutes || 0
+    };
+
+    const conflictingJobs = await checkForConflicts(newJob, req.session.userId);
+    if (conflictingJobs.length > 0) {
+        return res.status(409).json({ error: 'Recording conflict detected.', newJob, conflictingJobs });
+    }
+
+    db.run(`INSERT INTO dvr_jobs (user_id, channelId, channelName, programTitle, startTime, endTime, status, profileId, userAgentId, preBufferMinutes, postBufferMinutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [newJob.user_id, newJob.channelId, newJob.channelName, newJob.programTitle, newJob.startTime, newJob.endTime, newJob.status, newJob.profileId, newJob.userAgentId, newJob.preBufferMinutes, newJob.postBufferMinutes],
+        function (err) {
+            if (err) {
+                console.error('[DVR_API] Error scheduling new recording:', err);
+                return res.status(500).json({ error: 'Could not schedule recording.' });
+            }
+            const jobWithId = { ...newJob, id: this.lastID };
+            scheduleDvrJob(jobWithId);
+            res.status(201).json({ success: true, job: jobWithId });
+        }
+    );
+});
+
+app.post('/api/dvr/schedule/manual', requireAuth, requireDvrAccess, async (req, res) => {
+    const { channelId, channelName, startTime, endTime } = req.body;
+    const settings = getSettings();
+    const dvrSettings = settings.dvr || {};
+
+    const newJob = {
+        user_id: req.session.userId,
+        channelId,
+        channelName,
+        programTitle: `Manual Recording: ${channelName}`,
+        startTime,
+        endTime,
+        status: 'scheduled',
+        profileId: dvrSettings.activeRecordingProfileId,
+        userAgentId: settings.activeUserAgentId,
+        preBufferMinutes: 0,
+        postBufferMinutes: 0
+    };
+
+    const conflictingJobs = await checkForConflicts(newJob, req.session.userId);
+    if (conflictingJobs.length > 0) {
+        return res.status(409).json({ error: 'Recording conflict detected.', newJob, conflictingJobs });
+    }
+
+    db.run(`INSERT INTO dvr_jobs (user_id, channelId, channelName, programTitle, startTime, endTime, status, profileId, userAgentId, preBufferMinutes, postBufferMinutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [newJob.user_id, newJob.channelId, newJob.channelName, newJob.programTitle, newJob.startTime, newJob.endTime, newJob.status, newJob.profileId, newJob.userAgentId, newJob.preBufferMinutes, newJob.postBufferMinutes],
+        function (err) {
+            if (err) return res.status(500).json({ error: 'Could not schedule recording.' });
+            const jobWithId = { ...newJob, id: this.lastID };
+            scheduleDvrJob(jobWithId);
+            res.status(201).json({ success: true, job: jobWithId });
+        }
+    );
+});
+
+// MODIFIED: Endpoint logic to show all jobs to admin, or user's jobs to them.
+app.get('/api/dvr/jobs', requireAuth, (req, res) => {
+    if (req.session.isAdmin) {
+        // Admins see all jobs, with username
+        const query = "SELECT j.*, u.username FROM dvr_jobs j JOIN users u ON j.user_id = u.id ORDER BY j.startTime DESC";
+        db.all(query, [], (err, rows) => {
+            if (err) return res.status(500).json({ error: 'Failed to retrieve all recording jobs.' });
+            res.json(rows);
+        });
+    } else if (req.session.canUseDvr) {
+        // Users with DVR access see only their own jobs
+        const query = "SELECT * FROM dvr_jobs WHERE user_id = ? ORDER BY startTime DESC";
+        db.all(query, [req.session.userId], (err, rows) => {
+            if (err) return res.status(500).json({ error: 'Failed to retrieve your recording jobs.' });
+            // Add a username to be consistent with admin view
+            const jobsWithUser = rows.map(r => ({ ...r, username: req.session.username }));
+            res.json(jobsWithUser);
+        });
+    } else {
+        // Users without DVR access see an empty list of scheduled jobs
+        res.json([]);
+    }
+});
+
+// MODIFIED: Endpoint to show completed recordings. Admins see all; users see only their own.
+app.get('/api/dvr/recordings', requireAuth, (req, res) => {
+    if (req.session.isAdmin) {
+        const query = "SELECT r.*, u.username FROM dvr_recordings r JOIN users u ON r.user_id = u.id ORDER BY r.startTime DESC";
+        db.all(query, [], (err, rows) => {
+            if (err) return res.status(500).json({ error: 'Failed to retrieve recordings.' });
+            const recordingsWithFilename = rows.map(r => ({ ...r, filename: path.basename(r.filePath) }));
+            res.json(recordingsWithFilename);
+        });
+    } else if (req.session.canUseDvr) {
+        const query = "SELECT r.*, u.username FROM dvr_recordings r JOIN users u ON r.user_id = u.id WHERE r.user_id = ? ORDER BY r.startTime DESC";
+        db.all(query, [req.session.userId], (err, rows) => {
+            if (err) return res.status(500).json({ error: 'Failed to retrieve recordings.' });
+            const recordingsWithFilename = rows.map(r => ({ ...r, filename: path.basename(r.filePath) }));
+            res.json(recordingsWithFilename);
+        });
+    } else {
+        res.json([]);
+    }
+});
+
+
+// MODIFIED: Loosened permission to requireAuth, as non-DVR users now see the DVR page.
+app.get('/api/dvr/storage', requireAuth, (req, res) => {
+    // Only return storage info if user has DVR access, otherwise return empty state.
+    if (!req.session.canUseDvr && !req.session.isAdmin) {
+        return res.json({ total: 0, used: 0, percentage: 0 });
+    }
+    try {
+        disk.check(DVR_DIR, (err, info) => {
+            if (err) {
+                console.error('[DVR_STORAGE] Error checking disk usage:', err);
+                return res.status(500).json({ error: 'Could not get storage information.' });
+            }
+            const used = info.total - info.free;
+            const percentage = Math.round((used / info.total) * 100);
+            res.json({
+                total: info.total,
+                used: used,
+                percentage: percentage
+            });
+        });
+    } catch (e) {
+        console.error('[DVR_STORAGE] Unhandled error in diskusage:', e);
+        res.status(500).json({ error: 'Server error checking storage.' });
+    }
+});
+
+app.delete('/api/dvr/jobs/all', requireAuth, requireDvrAccess, (req, res) => {
+    const userId = req.session.userId;
+    console.log(`[DVR_API] Clearing all scheduled/historical jobs for user ${userId}.`);
+
+    db.all("SELECT id FROM dvr_jobs WHERE user_id = ? AND status = 'scheduled'", [userId], (err, scheduledJobs) => {
+        if (err) {
+            return res.status(500).json({ error: 'Could not fetch jobs to cancel.' });
+        }
+        scheduledJobs.forEach(job => {
+            if (activeDvrJobs.has(job.id)) {
+                const j = activeDvrJobs.get(job.id);
+                j.startJob?.cancel();
+                j.stopJob?.cancel();
+                activeDvrJobs.delete(job.id);
+            }
+        });
+
+        db.run("DELETE FROM dvr_jobs WHERE user_id = ?", [userId], function (err) {
+            if (err) {
+                return res.status(500).json({ error: 'Could not clear jobs from database.' });
+            }
+            res.json({ success: true, deletedCount: this.changes });
+        });
+    });
+});
+
+app.delete('/api/dvr/recordings/all', requireAuth, requireDvrAccess, (req, res) => {
+    const userId = req.session.userId;
+    console.log(`[DVR_API] Deleting all completed recordings for user ${userId}.`);
+
+    db.all("SELECT id, filePath FROM dvr_recordings WHERE user_id = ?", [userId], (err, recordings) => {
+        if (err) {
+            return res.status(500).json({ error: 'Could not fetch recordings to delete.' });
+        }
+
+        recordings.forEach(rec => {
+            if (fs.existsSync(rec.filePath)) {
+                fs.unlink(rec.filePath, (unlinkErr) => {
+                    if (unlinkErr) console.error(`[DVR_API] Failed to delete file ${rec.filePath}:`, unlinkErr);
+                });
+            }
+        });
+
+        db.run("DELETE FROM dvr_recordings WHERE user_id = ?", [userId], function (err) {
+            if (err) {
+                return res.status(500).json({ error: 'Could not clear recordings from database.' });
+            }
+            res.json({ success: true, deletedCount: this.changes });
+        });
+    });
+});
+
+
+app.delete('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, (req, res) => {
+    const { id } = req.params;
+    const jobId = parseInt(id, 10);
+    if (activeDvrJobs.has(jobId)) {
+        const j = activeDvrJobs.get(jobId);
+        j.startJob?.cancel();
+        j.stopJob?.cancel();
+        activeDvrJobs.delete(jobId);
+    }
+    // MODIFIED: Admin can cancel any job, user can only cancel their own.
+    const query = req.session.isAdmin ? "UPDATE dvr_jobs SET status = 'cancelled' WHERE id = ?" : "UPDATE dvr_jobs SET status = 'cancelled' WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [jobId] : [jobId, req.session.userId];
+
+    db.run(query, params, function (err) {
+        if (err) return res.status(500).json({ error: 'Could not cancel job.' });
+        if (this.changes === 0) return res.status(404).json({ error: 'Job not found or not authorized to cancel.' });
+        console.log(`[DVR_API] Cancelled job ${jobId}.`);
+        res.json({ success: true });
+    });
+});
+
+app.delete('/api/dvr/recordings/:id', requireAuth, requireDvrAccess, (req, res) => {
+    const { id } = req.params;
+    // MODIFIED: Admin can delete any recording, user can only delete their own.
+    const query = req.session.isAdmin ? "SELECT filePath FROM dvr_recordings WHERE id = ?" : "SELECT filePath FROM dvr_recordings WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [id] : [id, req.session.userId];
+
+    db.get(query, params, (err, row) => {
+        if (err || !row) return res.status(404).json({ error: 'Recording not found or not authorized.' });
+
+        if (fs.existsSync(row.filePath)) {
+            fs.unlink(row.filePath, (unlinkErr) => {
+                if (unlinkErr) console.error(`[DVR_API] Failed to delete file ${row.filePath}:`, unlinkErr);
+            });
+        }
+        db.run("DELETE FROM dvr_recordings WHERE id = ?", [id], (deleteErr) => {
+            if (deleteErr) return res.status(500).json({ error: 'Failed to delete recording record.' });
+            res.json({ success: true });
+        });
+    });
+});
+
+app.post('/api/dvr/jobs/:id/stop', requireAuth, requireDvrAccess, (req, res) => {
+    const { id } = req.params;
+    const jobId = parseInt(id, 10);
+    console.log(`[DVR_API] Received request to stop recording for job ${jobId}.`);
+    stopRecording(jobId);
+
+    // MODIFIED: Admin can stop any job, user can only stop their own.
+    const query = req.session.isAdmin ? "UPDATE dvr_jobs SET status = 'completed' WHERE id = ?" : "UPDATE dvr_jobs SET status = 'completed' WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [jobId] : [jobId, req.session.userId];
+
+    db.run(query, params, function (err) {
+        if (err) return res.status(500).json({ error: 'Could not update job status after stop.' });
+        if (this.changes === 0) return res.status(404).json({ error: 'Job not found or not authorized to stop.' });
+        res.json({ success: true });
+    });
+});
+
+app.put('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, (req, res) => {
+    const { id } = req.params;
+    const { startTime, endTime } = req.body;
+    if (!startTime || !endTime) {
+        return res.status(400).json({ error: 'Both startTime and endTime are required.' });
+    }
+
+    // MODIFIED: Admin can edit any job, user can only edit their own.
+    const getQuery = req.session.isAdmin ? "SELECT * from dvr_jobs WHERE id = ?" : "SELECT * from dvr_jobs WHERE id = ? AND user_id = ?";
+    const getParams = req.session.isAdmin ? [id] : [id, req.session.userId];
+
+    db.get(getQuery, getParams, (err, job) => {
+        if (err) return res.status(500).json({ error: 'DB error fetching job.' });
+        if (!job) return res.status(404).json({ error: 'Job not found or unauthorized.' });
+        if (job.status !== 'scheduled') return res.status(400).json({ error: 'Only scheduled jobs can be modified.' });
+
+        db.run("UPDATE dvr_jobs SET startTime = ?, endTime = ? WHERE id = ?", [startTime, endTime, id], function (err) {
+            if (err) return res.status(500).json({ error: 'Could not update job.' });
+
+            const updatedJob = { ...job, startTime, endTime };
+            scheduleDvrJob(updatedJob);
+
+            console.log(`[DVR_API] Updated and rescheduled job ${id}.`);
+            res.json({ success: true, job: updatedJob });
+        });
+    });
+});
+
+app.delete('/api/dvr/jobs/:id/history', requireAuth, requireDvrAccess, (req, res) => {
+    const { id } = req.params;
+    // MODIFIED: Admin can delete any job history, user can only delete their own.
+    const query = req.session.isAdmin ? "SELECT status FROM dvr_jobs WHERE id = ?" : "SELECT status FROM dvr_jobs WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [id] : [id, req.session.userId];
+
+    db.get(query, params, (err, job) => {
+        if (err || !job) {
+            return res.status(404).json({ error: 'Job not found or unauthorized.' });
+        }
+        if (['error', 'cancelled', 'completed'].includes(job.status)) {
+            db.run("DELETE FROM dvr_jobs WHERE id = ?", [id], function (err) {
+                if (err) return res.status(500).json({ error: 'Could not delete job history.' });
+                console.log(`[DVR_API] Deleted job history for job ${id}.`);
+                res.json({ success: true });
+            });
+        } else {
+            return res.status(400).json({ error: 'Only completed, cancelled, or error jobs can be removed from history.' });
+        }
+    });
+});
+// [ROUTES MOVED TO ESM: /api/events, /api/validate-url, /api/hardware, /api/public-ip]
+
 // [ROUTES MOVED TO ESM: /api/image-proxy, /api/settings/export, /api/settings/import, /api/logs/*]
-// [ROUTES MOVED TO ESM: /api/cast/generate-token]
-// [ROUTES MOVED TO ESM: /api/multiview/layouts/*]
+
+// --- CAST endpoint moved to src/routes/cast.js ---
+// --- IMAGE_PROXY endpoint moved to src/routes/image-proxy.js ---
+// --- SETTINGS import/export moved to src/routes/settings-io.js ---
+// --- LOGS endpoints moved to src/routes/logs.js ---
+// --- MULTIVIEW endpoints moved to src/routes/multiview.js ---
 
 // --- Server Start ---
 // When loaded as a module, export the app and skip listen.
