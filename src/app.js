@@ -171,6 +171,8 @@ app.get('/api/health', (_req, res) => {
 // --- Mount legacy server.js routes (everything not yet extracted) ---
 // Mounted after new routes so our handlers take priority.
 const legacyApp = require('../server.cjs');
+legacyApp._getSettings = getSettings;
+legacyApp._saveSettings = saveSettings;
 app.use(legacyApp);
 
 const hlsCleanup = streamRoutes.killAllHlsStreams;

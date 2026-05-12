@@ -14,7 +14,7 @@ const path = require('path');
 const multer = require('multer');
 const bodyParser = require('body-parser');
 const session = require('express-session');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const sqlite3 = require('./src/db/compat.cjs');
 let SQLiteStore; // Lazy-init inside isMainModule guard, avoids requiring connect-sqlite3 when loaded as module
 const xmlJS = require('xml-js');
@@ -341,13 +341,17 @@ const updateAndScheduleSourceRefreshes = () => {
 };
 
 function saveSettings(settings) {
-    try {
-        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
-        console.log('[SETTINGS] Settings saved successfully.');
-        updateAndScheduleSourceRefreshes();
-    } catch (e) {
-        console.error("[SETTINGS] Error saving settings:", e);
+    if (app._saveSettings) {
+        app._saveSettings(settings);
+    } else {
+        try {
+            fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+            console.log('[SETTINGS] Settings saved successfully.');
+        } catch (e) {
+            console.error("[SETTINGS] Error saving settings:", e);
+        }
     }
+    updateAndScheduleSourceRefreshes();
 }
 
 if (isMainModule) {
@@ -689,6 +693,7 @@ function broadcastSseToAll(eventName, data) {
 }
 
 function getSettings() {
+    if (app._getSettings) return app._getSettings();
     const defaultSettings = {
         m3uSources: [],
         epgSources: [],
@@ -4215,6 +4220,13 @@ async function startRecording(job) {
     console.log(`[DVR] Using recording profile: "${recProfile.name}"`);
 
     const streamUrlToRecord = channel.url;
+    // Sanitize URL: must start with http(s):// to prevent ffmpeg argument injection
+    if (!/^https?:\/\/.+/.test(streamUrlToRecord)) {
+        const errorMsg = `Invalid stream URL for channel: ${streamUrlToRecord}`;
+        console.error(`[DVR] Cannot start recording job ${job.id}: ${errorMsg}`);
+        db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [errorMsg, job.id]);
+        return;
+    }
     // **MODIFIED: Change file extension based on profile to support .ts files.**
     const fileExtension = recProfile.command.includes('-f mp4') ? '.mp4' : '.ts';
     const safeFilename = `${job.id}_${job.programTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase()}${fileExtension}`;
@@ -4297,7 +4309,9 @@ async function startRecording(job) {
 
 function scheduleDvrJob(job) {
     if (activeDvrJobs.has(job.id)) {
-        activeDvrJobs.get(job.id)?.cancel();
+        const existing = activeDvrJobs.get(job.id);
+        existing.startJob?.cancel();
+        existing.stopJob?.cancel();
         activeDvrJobs.delete(job.id);
     }
 
@@ -4313,15 +4327,17 @@ function scheduleDvrJob(job) {
         return;
     }
 
+    const info = {};
+
     if (startTime > now) {
-        const startJob = schedule.scheduleJob(startTime, () => startRecording(job));
-        activeDvrJobs.set(job.id, startJob);
+        info.startJob = schedule.scheduleJob(startTime, () => startRecording(job));
         console.log(`[DVR] Scheduled recording start for job ${job.id} at ${startTime}`);
     } else {
         startRecording(job);
     }
 
-    schedule.scheduleJob(endTime, () => stopRecording(job.id));
+    info.stopJob = schedule.scheduleJob(endTime, () => stopRecording(job.id));
+    activeDvrJobs.set(job.id, info);
     console.log(`[DVR] Scheduled recording stop for job ${job.id} at ${endTime}`);
 }
 
@@ -4594,7 +4610,9 @@ app.delete('/api/dvr/jobs/all', requireAuth, requireDvrAccess, (req, res) => {
         }
         scheduledJobs.forEach(job => {
             if (activeDvrJobs.has(job.id)) {
-                activeDvrJobs.get(job.id)?.cancel();
+                const j = activeDvrJobs.get(job.id);
+                j.startJob?.cancel();
+                j.stopJob?.cancel();
                 activeDvrJobs.delete(job.id);
             }
         });
@@ -4639,7 +4657,9 @@ app.delete('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, (req, res) => {
     const { id } = req.params;
     const jobId = parseInt(id, 10);
     if (activeDvrJobs.has(jobId)) {
-        activeDvrJobs.get(jobId)?.cancel();
+        const j = activeDvrJobs.get(jobId);
+        j.startJob?.cancel();
+        j.stopJob?.cancel();
         activeDvrJobs.delete(jobId);
     }
     // MODIFIED: Admin can cancel any job, user can only cancel their own.
@@ -5149,8 +5169,9 @@ detectHardwareAcceleration().then(() => {
 
 module.exports = app;
 app._shutdownDvr = function () {
-  for (const [jobId, job] of activeDvrJobs) {
-    try { job?.cancel(); } catch {}
+  for (const [jobId, info] of activeDvrJobs) {
+    try { info.startJob?.cancel(); } catch {}
+    try { info.stopJob?.cancel(); } catch {}
     activeDvrJobs.delete(jobId);
   }
   for (const [jobId, pid] of runningFFmpegProcesses) {

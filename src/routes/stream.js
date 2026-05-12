@@ -16,12 +16,34 @@ const hlsStreams = new Map();
 export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sseClients }) {
   const router = Router();
 
+  function broadcastAdminActivity() {
+    const live = [];
+    for (const info of activeStreamProcesses.values()) {
+      live.push({
+        streamKey: info.streamKey,
+        userId: info.userId,
+        username: info.username,
+        channelName: info.channelName,
+        channelLogo: info.channelLogo,
+        streamProfileName: info.streamProfileName,
+        startTime: info.startTime,
+        clientIp: info.clientIp,
+        isTranscoded: !!info.isTranscoded,
+      });
+    }
+    const msg = `event: activity-update\ndata: ${JSON.stringify({ live })}\n\n`;
+    for (const clients of sseClients.values()) {
+      clients.forEach(c => { if (c.isAdmin) c.res.write(msg); });
+    }
+  }
+
   // Ensure HLS directory exists
   if (!fs.existsSync(HLS_DIR)) fs.mkdirSync(HLS_DIR, { recursive: true });
 
   // Serve HLS playlist (.m3u8)
   router.get('/hls/:streamId/stream.m3u8', (req, res) => {
-    const playlistPath = path.join(HLS_DIR, req.params.streamId, 'stream.m3u8');
+    const playlistPath = path.resolve(HLS_DIR, req.params.streamId, 'stream.m3u8');
+    if (!playlistPath.startsWith(HLS_DIR + path.sep)) return res.status(403).send('Forbidden');
     if (!fs.existsSync(playlistPath)) {
       return res.status(404).send('Stream not found or has ended.');
     }
@@ -32,7 +54,8 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
 
   // Serve HLS segments (.ts)
   router.get('/hls/:streamId/:segment', (req, res) => {
-    const segPath = path.join(HLS_DIR, req.params.streamId, req.params.segment);
+    const segPath = path.resolve(HLS_DIR, req.params.streamId, req.params.segment);
+    if (!segPath.startsWith(HLS_DIR + path.sep)) return res.status(403).send('Forbidden');
     if (!fs.existsSync(segPath)) {
       return res.status(404).send('Segment not found.');
     }
@@ -121,9 +144,31 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
 
     hlsStreams.set(streamKey, streamInfo);
 
+    // Register in shared activeStreamProcesses so admins/janitor can see HLS activity
+    const activeInfo = {
+      process: ffmpeg,
+      references: 1,
+      lastAccess: Date.now(),
+      userId,
+      username,
+      channelId: null,
+      channelName: `HLS: ${url.slice(0, 60)}`,
+      channelLogo: null,
+      streamProfileName: profile?.name || 'HLS (Built-in)',
+      startTime: new Date().toISOString(),
+      historyId: null,
+      clientIp: null,
+      streamKey,
+      isTranscoded: true,
+    };
+    activeStreamProcesses.set(streamKey, activeInfo);
+    broadcastAdminActivity(sseClients);
+
     ffmpeg.on('close', (code) => {
       logger.info({ streamKey, code }, 'HLS stream ended');
       hlsStreams.delete(streamKey);
+      activeStreamProcesses.delete(streamKey);
+      broadcastAdminActivity(sseClients);
       // Clean up segments
       try { fs.rmSync(streamDir, { recursive: true, force: true }); } catch {}
     });
