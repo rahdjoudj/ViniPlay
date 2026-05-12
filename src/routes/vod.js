@@ -1,10 +1,7 @@
 import { Router } from 'express';
-import { createRequire } from 'module';
 import { logger } from '../config/logger.js';
 import { requireAuth } from '../middleware/auth.js';
-
-const require = createRequire(import.meta.url);
-const XtreamClient = require('../../xtreamClient.cjs');
+import XtreamClient from '../../xtreamClient.js';
 
 export function createVodRoutes({ db, getSettings }) {
   const router = Router();
