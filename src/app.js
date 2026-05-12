@@ -140,9 +140,10 @@ const sseClients = new Map();
 const activeStreamProcesses = new Map();
 const activeCastTokens = new Map();
 const activeDvrJobs = new Map();
+const activeRedirectStreams = new Map();
 const detectedHardware = {};
 
-const shared = { db, getSettings, saveSettings, sseClients, activeStreamProcesses, activeCastTokens, activeDvrJobs, vapidKeys, webpush, detectedHardware };
+const shared = { db, getSettings, saveSettings, sseClients, activeStreamProcesses, activeCastTokens, activeDvrJobs, activeRedirectStreams, vapidKeys, webpush, detectedHardware };
 
 // --- Mount new modular routes (take priority) ---
 const { createAuthRoutes } = await import('./routes/auth.js');
@@ -157,6 +158,8 @@ const { createImageProxyRoutes } = await import('./routes/image-proxy.js');
 const { createLogRoutes } = await import('./routes/logs.js');
 const { createSettingsIoRoutes } = await import('./routes/settings-io.js');
 const { createMultiviewRoutes } = await import('./routes/multiview.js');
+const { createStreamMgmtRoutes } = await import('./routes/stream-mgmt.js');
+const { createAdminRoutes } = await import('./routes/admin.js');
 
 app.use('/api/auth', createAuthRoutes(shared));
 app.use('/api/users', createUserRoutes(shared));
@@ -169,6 +172,8 @@ app.use('/api', createImageProxyRoutes());
 app.use('/api/logs', createLogRoutes());
 app.use('/api', createSettingsIoRoutes());
 app.use('/api/multiview', createMultiviewRoutes(shared));
+app.use('/api', createStreamMgmtRoutes(shared));
+app.use('/api', createAdminRoutes(shared));
 const streamRoutes = createStreamRoutes(shared);
 app.use('/stream', streamRoutes);
 app.use('/api/stream', streamRoutes);
