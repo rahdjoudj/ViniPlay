@@ -184,14 +184,33 @@ app.get('/api/health', (_req, res) => {
 });
 
 // --- Mount legacy server.js routes (everything not yet extracted) ---
-// Mounted after new routes so our handlers take priority.
+// Must be required BEFORE creating DVR routes to access parseM3U
 const legacyApp = require('../server.cjs');
 legacyApp._getSettings = getSettings;
 legacyApp._saveSettings = saveSettings;
+shared.parseM3U = legacyApp._parseM3U;
+
+// --- Mount DVR routes (after legacy load for parseM3U, before legacy mount for priority) ---
+const { createDvrRoutes } = await import('./routes/dvr.js');
+const dvrRoutes = createDvrRoutes(shared);
+app.use('/api', dvrRoutes);
+app.use('/dvr', dvrRoutes);
+
+// Load and schedule pending DVR jobs on startup
+db.prepare("UPDATE dvr_jobs SET status = 'error', errorMessage = 'Server restarted during recording.' WHERE status = 'recording'").run();
+const pendingJobs = db.prepare("SELECT * FROM dvr_jobs WHERE status = 'scheduled'").all();
+for (const job of pendingJobs) dvrRoutes.engine.scheduleDvrJob(job);
+logger.info({ dvrJobs: pendingJobs.length }, 'DVR jobs loaded and scheduled');
+
 app.use(legacyApp);
 
 const hlsCleanup = streamRoutes.killAllHlsStreams;
-const dvrShutdown = legacyApp._shutdownDvr;
+const dvrShutdown = () => {
+  if (legacyApp._shutdownDvr) legacyApp._shutdownDvr();
+  for (const [, pid] of dvrRoutes.engine.runningFFmpegProcesses) {
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+  }
+};
 
 // --- SPA fallback ---
 app.get('*', (req, res) => {
