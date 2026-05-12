@@ -10,6 +10,7 @@ export function getDb() {
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
+    db.pragma('busy_timeout = 5000');
     logger.info({ path: DB_PATH }, 'Database connected');
     runMigrations(db);
   }

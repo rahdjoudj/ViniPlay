@@ -77,7 +77,7 @@ const SQLiteStore = require('connect-sqlite3')(session);
 
 app.use(
   session({
-    store: new SQLiteStore({ db: 'viniplay.db', dir: DATA_DIR, table: 'http_sessions' }),
+    store: new SQLiteStore({ db: 'sessions.db', dir: DATA_DIR, table: 'http_sessions' }),
     secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
@@ -242,6 +242,7 @@ app.get('*', (req, res) => {
 // --- Error handler ---
 app.use((err, _req, res, _next) => {
   logger.error({ err }, 'Unhandled error');
+  if (res.headersSent) return;
   res.status(500).json({ error: env.NODE_ENV === 'development' ? err.message : 'Internal server error' });
 });
 
