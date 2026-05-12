@@ -10,9 +10,12 @@ import { broadcastAdminUpdate } from './_sse-utils.js';
 const HLS_DIR = path.join(DATA_DIR, 'hls');
 const HLS_SEGMENT_TIME = 2;
 const HLS_LIST_SIZE = 5;
+const HLS_INACTIVITY_TIMEOUT = 30_000;
+const HLS_CLEANUP_INTERVAL = 30_000;
 
 // Track active HLS streams: streamKey -> { ffmpeg, url, userId, createdAt, references }
 const hlsStreams = new Map();
+const hlsStreamByDir = new Map();
 
 export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sseClients, activeRedirectStreams, activeCastTokens, parseM3U }) {
   const router = Router();
@@ -48,6 +51,11 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     if (!fs.existsSync(playlistPath)) {
       return res.status(404).send('Stream not found or has ended.');
     }
+
+    const streamKey = hlsStreamByDir.get(req.params.streamId);
+    const info = streamKey ? hlsStreams.get(streamKey) : null;
+    if (info) info.lastAccess = Date.now();
+
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.sendFile(playlistPath);
@@ -60,6 +68,11 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     if (!fs.existsSync(segPath)) {
       return res.status(404).send('Segment not found.');
     }
+
+    const streamKey = hlsStreamByDir.get(req.params.streamId);
+    const info = streamKey ? hlsStreams.get(streamKey) : null;
+    if (info) info.lastAccess = Date.now();
+
     res.setHeader('Content-Type', 'video/mp2t');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.sendFile(segPath);
@@ -144,6 +157,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     };
 
     hlsStreams.set(streamKey, streamInfo);
+    hlsStreamByDir.set(streamId, streamKey);
 
     // Register in shared activeStreamProcesses so admins/janitor can see HLS activity
     const activeInfo = {
@@ -168,6 +182,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     ffmpeg.on('close', (code) => {
       logger.info({ streamKey, code }, 'HLS stream ended');
       hlsStreams.delete(streamKey);
+      hlsStreamByDir.delete(streamId);
       activeStreamProcesses.delete(streamKey);
       broadcastAdminActivity(sseClients);
       // Clean up segments
@@ -180,6 +195,14 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     });
 
     res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
+
+    req.on('close', () => {
+      const info = hlsStreams.get(streamKey);
+      if (info) {
+        info.references = Math.max(0, info.references - 1);
+        info.lastAccess = Date.now();
+      }
+    });
   });
 
   // Stop an HLS stream — accepts both { streamKey } and { url } formats
@@ -218,12 +241,12 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
   setInterval(() => {
     const now = Date.now();
     for (const [key, info] of hlsStreams) {
-      if (info.references <= 0 && (now - info.lastAccess > 300_000)) {
+      if (info.references <= 0 && (now - info.lastAccess > HLS_INACTIVITY_TIMEOUT)) {
         logger.info({ streamKey: key }, 'Cleaning up inactive HLS stream');
         killHls(info, key);
       }
     }
-  }, 300_000).unref();
+  }, HLS_CLEANUP_INTERVAL).unref();
 
   function killAllHlsStreams() {
     for (const [key, info] of hlsStreams) {
