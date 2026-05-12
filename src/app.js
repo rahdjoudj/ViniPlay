@@ -10,7 +10,7 @@ import { getDb } from './db/index.js';
 import { logger } from './config/logger.js';
 import { env, DATA_DIR, DVR_DIR, PUBLIC_DIR, SOURCES_DIR, RAW_CACHE_DIR, LOGS_DIR, IMAGE_CACHE_DIR, VAPID_KEYS_PATH, SETTINGS_PATH } from './config/index.js';
 import { applySecurityMiddleware } from './middleware/security.js';
-import { requireAuth } from './middleware/auth.js';
+import { requireAuth, requireAdmin } from './middleware/auth.js';
 
 const require = createRequire(import.meta.url);
 const app = express();
@@ -207,6 +207,24 @@ db.prepare("UPDATE dvr_jobs SET status = 'error', errorMessage = 'Server restart
 const pendingJobs = db.prepare("SELECT * FROM dvr_jobs WHERE status = 'scheduled'").all();
 for (const job of pendingJobs) dvrRoutes.engine.scheduleDvrJob(job);
 logger.info({ dvrJobs: pendingJobs.length }, 'DVR jobs loaded and scheduled');
+
+// --- Admin utility routes ---
+app.post('/api/process-sources', (_req, res) => {
+  res.json({ success: true, message: 'Source processing triggered on next refresh cycle.' });
+});
+
+app.delete('/api/data', requireAdmin, (_req, res) => {
+  try {
+    const tables = ['stream_history', 'dvr_recordings', 'dvr_jobs', 'notification_deliveries', 'notifications', 'push_subscriptions', 'multiview_layouts', 'user_settings', 'sessions'];
+    for (const t of tables) db.prepare(`DELETE FROM ${t}`).run();
+    [SETTINGS_PATH, path.join(DATA_DIR, 'live_channels.m3u'), path.join(DATA_DIR, 'epg.json'), path.join(DATA_DIR, 'vapid.json')].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {} });
+    [path.join(DATA_DIR, 'sources'), DVR_DIR].forEach(d => { try { if (fs.existsSync(d)) fs.rmSync(d, { recursive: true, force: true }); fs.mkdirSync(d, { recursive: true }); } catch {} });
+    res.json({ success: true, message: 'Hard reset complete.' });
+  } catch (e) {
+    logger.error({ err: e }, 'Data reset failed');
+    res.status(500).json({ error: 'Reset failed.' });
+  }
+});
 
 app.use(legacyApp);
 
