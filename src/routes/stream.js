@@ -133,17 +133,6 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       // close handler will fire next and clean up
     });
 
-    // Cleanup stale streams every 5 minutes
-    setInterval(() => {
-      const now = Date.now();
-      for (const [key, info] of hlsStreams) {
-        if (info.references <= 0 && (now - info.lastAccess > 300_000)) {
-          logger.info({ streamKey: key }, 'Cleaning up inactive HLS stream');
-          killHls(info, key);
-        }
-      }
-    }, 300_000).unref();
-
     res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
   });
 
@@ -170,7 +159,30 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     if (info.references <= 0) {
       info.stopped = true;
       info.ffmpeg.kill('SIGTERM');
-      // Don't delete dir here — ffmpeg close handler will clean up
+      const timer = setTimeout(() => {
+        if (info.ffmpeg.exitCode === null) {
+          try { info.ffmpeg.kill('SIGKILL'); } catch {}
+        }
+      }, 5000);
+      timer.unref();
+    }
+  }
+
+  // Singleton cleanup interval — runs once at module level, not per request
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, info] of hlsStreams) {
+      if (info.references <= 0 && (now - info.lastAccess > 300_000)) {
+        logger.info({ streamKey: key }, 'Cleaning up inactive HLS stream');
+        killHls(info, key);
+      }
+    }
+  }, 300_000).unref();
+
+  function killAllHlsStreams() {
+    for (const [key, info] of hlsStreams) {
+      logger.info({ streamKey: key }, 'Shutting down HLS stream');
+      killHls(info, key);
     }
   }
 
@@ -186,5 +198,6 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     res.json({ success: true });
   });
 
+  router.killAllHlsStreams = killAllHlsStreams;
   return router;
 }

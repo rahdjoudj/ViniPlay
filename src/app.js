@@ -3,6 +3,7 @@ import express from 'express';
 import session from 'express-session';
 import crypto from 'crypto';
 import fs from 'fs';
+import path from 'path';
 import { createRequire } from 'module';
 import webpush from 'web-push';
 import { getDb } from './db/index.js';
@@ -96,8 +97,21 @@ app.use((req, res, next) => {
   next();
 });
 
-// --- DVR static files ---
-app.use('/dvr', requireAuth, express.static(DVR_DIR));
+// --- DVR static files (ownership-checked) ---
+app.get('/dvr/*', requireAuth, (req, res) => {
+  const filePath = path.resolve(DVR_DIR, req.params[0]);
+  if (!filePath.startsWith(DVR_DIR + path.sep) && filePath !== DVR_DIR) {
+    return res.status(403).send('Forbidden');
+  }
+  if (!req.session.canUseDvr && !req.session.isAdmin) {
+    return res.status(403).send('Forbidden');
+  }
+  if (!req.session.isAdmin) {
+    const recording = db.prepare('SELECT filePath FROM dvr_recordings WHERE filePath = ? AND user_id = ?').get(filePath, req.session.userId);
+    if (!recording) return res.status(404).send('Recording not found');
+  }
+  res.sendFile(filePath);
+});
 
 // --- Initialize database ---
 const db = getDb();
@@ -159,6 +173,9 @@ app.get('/api/health', (_req, res) => {
 const legacyApp = require('../server.cjs');
 app.use(legacyApp);
 
+const hlsCleanup = streamRoutes.killAllHlsStreams;
+const dvrShutdown = legacyApp._shutdownDvr;
+
 // --- SPA fallback ---
 app.get('*', (req, res) => {
   const filePath = `${PUBLIC_DIR}${req.path}`;
@@ -174,4 +191,4 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: env.NODE_ENV === 'development' ? err.message : 'Internal server error' });
 });
 
-export { app, db, activeStreamProcesses };
+export { app, db, activeStreamProcesses, hlsCleanup, dvrShutdown };

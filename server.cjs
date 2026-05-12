@@ -429,7 +429,23 @@ const requireDvrAccess = (req, res, next) => {
 // *** FIX: DVR Playback Access ***
 // When running as a module, the parent app handles /dvr static serving.
 if (isMainModule) {
-app.use('/dvr', requireAuth, express.static(DVR_DIR));
+app.get('/dvr/*', requireAuth, (req, res) => {
+  const filePath = path.resolve(DVR_DIR, req.params[0]);
+  if (!filePath.startsWith(DVR_DIR + path.sep) && filePath !== DVR_DIR) {
+    return res.status(403).send('Forbidden');
+  }
+  if (!req.session.canUseDvr && !req.session.isAdmin) {
+    return res.status(403).send('Forbidden');
+  }
+  if (!req.session.isAdmin) {
+    db.get('SELECT filePath FROM dvr_recordings WHERE filePath = ? AND user_id = ?', [filePath, req.session.userId], (err, row) => {
+      if (err || !row) return res.status(404).send('Recording not found');
+      res.sendFile(filePath);
+    });
+    return;
+  }
+  res.sendFile(filePath);
+});
 }
 
 // --- Helper Functions ---
@@ -4520,15 +4536,25 @@ app.get('/api/dvr/jobs', requireAuth, (req, res) => {
     }
 });
 
-// MODIFIED: Endpoint to show all completed recordings to everyone.
+// MODIFIED: Endpoint to show completed recordings. Admins see all; users see only their own.
 app.get('/api/dvr/recordings', requireAuth, (req, res) => {
-    // All authenticated users can see all completed recordings, with username
-    const query = "SELECT r.*, u.username FROM dvr_recordings r JOIN users u ON r.user_id = u.id ORDER BY r.startTime DESC";
-    db.all(query, [], (err, rows) => {
-        if (err) return res.status(500).json({ error: 'Failed to retrieve recordings.' });
-        const recordingsWithFilename = rows.map(r => ({ ...r, filename: path.basename(r.filePath) }));
-        res.json(recordingsWithFilename);
-    });
+    if (req.session.isAdmin) {
+        const query = "SELECT r.*, u.username FROM dvr_recordings r JOIN users u ON r.user_id = u.id ORDER BY r.startTime DESC";
+        db.all(query, [], (err, rows) => {
+            if (err) return res.status(500).json({ error: 'Failed to retrieve recordings.' });
+            const recordingsWithFilename = rows.map(r => ({ ...r, filename: path.basename(r.filePath) }));
+            res.json(recordingsWithFilename);
+        });
+    } else if (req.session.canUseDvr) {
+        const query = "SELECT r.*, u.username FROM dvr_recordings r JOIN users u ON r.user_id = u.id WHERE r.user_id = ? ORDER BY r.startTime DESC";
+        db.all(query, [req.session.userId], (err, rows) => {
+            if (err) return res.status(500).json({ error: 'Failed to retrieve recordings.' });
+            const recordingsWithFilename = rows.map(r => ({ ...r, filename: path.basename(r.filePath) }));
+            res.json(recordingsWithFilename);
+        });
+    } else {
+        res.json([]);
+    }
 });
 
 
@@ -5122,6 +5148,16 @@ detectHardwareAcceleration().then(() => {
 } // end if (isMainModule)
 
 module.exports = app;
+app._shutdownDvr = function () {
+  for (const [jobId, job] of activeDvrJobs) {
+    try { job?.cancel(); } catch {}
+    activeDvrJobs.delete(jobId);
+  }
+  for (const [jobId, pid] of runningFFmpegProcesses) {
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+  }
+  console.log('[SHUTDOWN] DVR cleanup: cancelled scheduled jobs and signalled ffmpeg processes');
+};
 
 // --- Helper Functions (Full Implementation) ---
 function parseM3U(data) {
