@@ -4,6 +4,7 @@ import session from 'express-session';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import { createRequire } from 'module';
 import webpush from 'web-push';
 import { getDb } from './db/index.js';
@@ -42,19 +43,233 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // --- Settings helpers ---
+function saveSettings(settings) {
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+}
+
+// --- Hardware detection (must run before getSettings / session setup) ---
+function detectHardware() {
+  const hardware = {};
+  try {
+    const driDevices = [];
+    try {
+      const driDir = '/dev/dri';
+      if (fs.existsSync(driDir)) {
+        const entries = fs.readdirSync(driDir);
+        for (const e of entries) {
+          if (e.startsWith('renderD')) driDevices.push(path.join(driDir, e));
+        }
+      }
+    } catch {}
+
+    if (driDevices.length > 0) {
+      try {
+        const out = execSync('vainfo 2>/dev/null', { encoding: 'utf-8', timeout: 5000 });
+        const outLower = out.toLowerCase();
+        if (outLower.includes('intel') || outLower.includes('i965') || outLower.includes('i915')) {
+          hardware.intel_qsv = 'Intel Quick Sync Video';
+          hardware.intel_vaapi = 'Intel VA-API';
+        } else if (outLower.includes('amd') || outLower.includes('radeon') || outLower.includes('amdgpu')) {
+          hardware.radeon_vaapi = 'AMD Radeon VA-API';
+        } else {
+          hardware.intel_vaapi = 'Intel VA-API (detected)';
+        }
+      } catch {
+        try {
+          const mods = execSync('lsmod 2>/dev/null', { encoding: 'utf-8', timeout: 3000 });
+          if (mods.includes('i915') || mods.includes('i965')) {
+            hardware.intel_qsv = 'Intel Quick Sync Video';
+            hardware.intel_vaapi = 'Intel VA-API';
+          } else if (mods.includes('amdgpu') || mods.includes('radeon')) {
+            hardware.radeon_vaapi = 'AMD Radeon VA-API';
+          } else {
+            hardware.intel_vaapi = 'Intel VA-API';
+          }
+        } catch {
+          hardware.intel_vaapi = 'Intel VA-API';
+        }
+      }
+    }
+
+    try {
+      const nvidiaSmi = execSync('nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null', { encoding: 'utf-8', timeout: 5000 }).trim();
+      if (nvidiaSmi) hardware.nvidia = nvidiaSmi;
+    } catch {}
+    if (!hardware.nvidia) {
+      try {
+        if (fs.existsSync('/dev/nvidia0') || fs.existsSync('/dev/nvidiactl')) {
+          hardware.nvidia = 'NVIDIA GPU';
+        }
+      } catch {}
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Hardware detection encountered an error');
+  }
+  return hardware;
+}
+
+const detectedHardware = detectHardware();
+logger.info({ ...detectedHardware }, 'Hardware detection complete');
+
+// --- Default settings ---
+const DEFAULT_SETTINGS = {
+  streamProfiles: [
+    { id: 'redirect', name: 'Redirect / Direct Play', command: 'redirect', isDefault: false },
+    { id: 'ffmpeg-default', name: 'ffmpeg (Software — Copy Codecs)', command: '-user_agent "{userAgent}" -re -i "{streamUrl}" -c copy -f mpegts pipe:1', isDefault: true },
+  ],
+  userAgents: [
+    { id: 'vlc', name: 'VLC/3.0', value: 'VLC/3.0', isDefault: true },
+    { id: 'chrome', name: 'Chrome (Windows)', value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', isDefault: false },
+    { id: 'firefox', name: 'Firefox (Windows)', value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0', isDefault: false },
+  ],
+  dvr: {
+    recordingProfiles: [
+      { id: 'dvr-ts-default', name: 'TS (Copy Codecs)', command: '-user_agent "{userAgent}" -i "{streamUrl}" -c copy -f mpegts "{filePath}"', isDefault: true },
+      { id: 'dvr-mp4-default', name: 'MP4 (Re-encode H.264/AAC)', command: '-user_agent "{userAgent}" -i "{streamUrl}" -c:v libx264 -preset medium -c:a aac -b:a 128k -movflags +faststart -f mp4 "{filePath}"', isDefault: false },
+    ],
+    activeRecordingProfileId: 'dvr-ts-default',
+    preBufferMinutes: 1,
+    postBufferMinutes: 2,
+    maxConcurrentRecordings: 1,
+    autoDeleteDays: 0,
+  },
+  castProfiles: [
+    { id: 'cast-default', name: 'Cast (Software H.264/AAC fMP4)', command: '-user_agent "{userAgent}" -i "{streamUrl}" -c:v libx264 -preset medium -c:a aac -b:a 128k -movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1', isDefault: true },
+  ],
+};
+
+function initializeSettings(existing, hardware) {
+  const settings = { ...existing };
+
+  const mergedProfiles = [...(settings.streamProfiles || [])];
+  for (const dp of DEFAULT_SETTINGS.streamProfiles) {
+    if (!mergedProfiles.some(p => p.id === dp.id)) mergedProfiles.push(dp);
+  }
+  if (hardware.nvidia) {
+    if (!mergedProfiles.some(p => p.id === 'ffmpeg-nvidia')) {
+      mergedProfiles.push({ id: 'ffmpeg-nvidia', name: 'ffmpeg (NVIDIA NVENC)', command: '-user_agent "{userAgent}" -re -i "{streamUrl}" -c:v h264_nvenc -preset p6 -tune hq -c:a copy -f mpegts pipe:1', isDefault: true });
+    }
+  }
+  if (hardware.intel_qsv) {
+    if (!mergedProfiles.some(p => p.id === 'ffmpeg-intel')) {
+      mergedProfiles.push({ id: 'ffmpeg-intel', name: 'ffmpeg (Intel QSV)', command: '-hwaccel qsv -c:v h264_qsv -i "{streamUrl}" -c:v h264_qsv -preset medium -c:a aac -b:a 128k -f mpegts pipe:1', isDefault: false });
+    }
+  }
+  if (hardware.intel_vaapi) {
+    if (!mergedProfiles.some(p => p.id === 'ffmpeg-vaapi')) {
+      mergedProfiles.push({ id: 'ffmpeg-vaapi', name: 'ffmpeg (VA-API) Intel', command: '-hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -vf "format=nv12|vaapi,hwupload" -c:v h264_vaapi -preset medium -c:a aac -b:a 128k -f mpegts pipe:1', isDefault: false });
+    }
+  }
+  if (hardware.radeon_vaapi) {
+    if (!mergedProfiles.some(p => p.id === 'ffmpeg-vaapi-amd')) {
+      mergedProfiles.push({ id: 'ffmpeg-vaapi-amd', name: 'ffmpeg (VA-API) Radeon/AMD', command: '-vaapi_device /dev/dri/renderD128 -hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -c:v h264_vaapi -c:a aac -b:a 128k -f mpegts pipe:1', isDefault: false });
+    }
+  }
+  settings.streamProfiles = mergedProfiles;
+
+  const mergedAgents = [...(settings.userAgents || [])];
+  for (const da of DEFAULT_SETTINGS.userAgents) {
+    if (!mergedAgents.some(a => a.id === da.id)) mergedAgents.push(da);
+  }
+  settings.userAgents = mergedAgents;
+
+  if (!settings.activeStreamProfileId) {
+    const def = mergedProfiles.find(p => p.isDefault) || mergedProfiles[0];
+    if (def) settings.activeStreamProfileId = def.id;
+  }
+  if (!settings.activeUserAgentId) {
+    const def = mergedAgents.find(a => a.isDefault) || mergedAgents[0];
+    if (def) settings.activeUserAgentId = def.id;
+  }
+
+  // DVR defaults
+  settings.dvr = { ...DEFAULT_SETTINGS.dvr, ...(settings.dvr || {}) };
+  const mergedDvrProfiles = [...(settings.dvr.recordingProfiles || [])];
+  for (const dp of DEFAULT_SETTINGS.dvr.recordingProfiles) {
+    if (!mergedDvrProfiles.some(p => p.id === dp.id)) mergedDvrProfiles.push(dp);
+  }
+  if (hardware.nvidia) {
+    if (!mergedDvrProfiles.some(p => p.id === 'dvr-mp4-nvidia')) {
+      mergedDvrProfiles.push({ id: 'dvr-mp4-nvidia', name: 'NVIDIA NVENC MP4 (H.264/AAC)', command: '-user_agent "{userAgent}" -i "{streamUrl}" -c:v h264_nvenc -preset p6 -tune hq -c:a aac -b:a 128k -movflags +faststart -f mp4 "{filePath}"', isDefault: true });
+    }
+  }
+  if (hardware.intel_qsv) {
+    if (!mergedDvrProfiles.some(p => p.id === 'dvr-mp4-intel')) {
+      mergedDvrProfiles.push({ id: 'dvr-mp4-intel', name: 'Intel QSV MP4 (H.264/AAC)', command: '-hwaccel qsv -c:v h264_qsv -i "{streamUrl}" -c:v h264_qsv -preset medium -c:a aac -b:a 128k -movflags +faststart -f mp4 "{filePath}"', isDefault: false });
+    }
+  }
+  if (hardware.intel_vaapi) {
+    if (!mergedDvrProfiles.some(p => p.id === 'dvr-mp4-vaapi')) {
+      mergedDvrProfiles.push({ id: 'dvr-mp4-vaapi', name: 'Intel VA-API MP4 (H.264/AAC)', command: '-hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -vf \'format=nv12,hwupload\' -c:v h264_vaapi -preset medium -c:a aac -b:a 128k -movflags +faststart -f mp4 "{filePath}"', isDefault: false });
+    }
+  }
+  if (hardware.radeon_vaapi) {
+    if (!mergedDvrProfiles.some(p => p.id === 'dvr-mp4-radeon-vaapi')) {
+      mergedDvrProfiles.push({ id: 'dvr-mp4-radeon-vaapi', name: 'Radeon/AMD VA-API MP4 (H.264/AAC)', command: '-vaapi_device /dev/dri/renderD128 -hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -c:v h264_vaapi -preset medium -c:a aac -b:a 128k -movflags +faststart -f mp4 "{filePath}"', isDefault: false });
+    }
+  }
+  settings.dvr.recordingProfiles = mergedDvrProfiles;
+  if (!settings.dvr.activeRecordingProfileId) {
+    const def = mergedDvrProfiles.find(p => p.isDefault) || mergedDvrProfiles[0];
+    if (def) settings.dvr.activeRecordingProfileId = def.id;
+  }
+
+  // Cast defaults
+  const mergedCastProfiles = [...(settings.castProfiles || [])];
+  for (const cp of DEFAULT_SETTINGS.castProfiles) {
+    if (!mergedCastProfiles.some(p => p.id === cp.id)) mergedCastProfiles.push(cp);
+  }
+  if (hardware.nvidia) {
+    if (!mergedCastProfiles.some(p => p.id === 'cast-nvidia')) {
+      mergedCastProfiles.push({ id: 'cast-nvidia', name: 'Cast (NVIDIA NVENC)', command: '-user_agent "{userAgent}" -i "{streamUrl}" -c:v h264_nvenc -preset p6 -tune hq -c:a aac -b:a 128k -movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1', isDefault: false });
+    }
+  }
+  if (hardware.intel_qsv) {
+    if (!mergedCastProfiles.some(p => p.id === 'cast-intel')) {
+      mergedCastProfiles.push({ id: 'cast-intel', name: 'Cast (Intel QSV)', command: '-hwaccel qsv -c:v h264_qsv -i "{streamUrl}" -c:v h264_qsv -preset medium -c:a aac -b:a 128k -movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1', isDefault: false });
+    }
+  }
+  if (hardware.intel_vaapi) {
+    if (!mergedCastProfiles.some(p => p.id === 'cast-vaapi')) {
+      mergedCastProfiles.push({ id: 'cast-vaapi', name: 'Cast (VA-API Intel)', command: '-hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -vf "format=nv12|vaapi,hwupload" -c:v h264_vaapi -c:a aac -b:a 128k -movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1', isDefault: false });
+    }
+  }
+  if (hardware.radeon_vaapi) {
+    if (!mergedCastProfiles.some(p => p.id === 'cast-vaapi-amd')) {
+      mergedCastProfiles.push({ id: 'cast-vaapi-amd', name: 'Cast (VA-API Radeon/AMD)', command: '-vaapi_device /dev/dri/renderD128 -hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -c:v h264_vaapi -c:a aac -b:a 128k -movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1', isDefault: false });
+    }
+  }
+  settings.castProfiles = mergedCastProfiles;
+  if (!settings.activeCastProfileId) {
+    const def = mergedCastProfiles.find(p => p.isDefault) || mergedCastProfiles[0];
+    if (def) settings.activeCastProfileId = def.id;
+  }
+
+  return settings;
+}
+
+let _settingsBootstrapped = false;
+
 function getSettings() {
   try {
+    let raw = {};
     if (fs.existsSync(SETTINGS_PATH)) {
-      return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
+      raw = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
     }
+    if (!_settingsBootstrapped) {
+      const bootstrapped = initializeSettings(raw, detectedHardware);
+      if (JSON.stringify(bootstrapped) !== JSON.stringify(raw)) {
+        saveSettings(bootstrapped);
+        logger.info('Settings bootstrapped with defaults');
+      }
+      _settingsBootstrapped = true;
+      return bootstrapped;
+    }
+    return raw;
   } catch (e) {
     logger.error({ err: e }, 'Failed to read settings');
   }
   return {};
-}
-
-function saveSettings(settings) {
-  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
 }
 
 // --- Session management ---
@@ -142,7 +357,6 @@ const activeStreamProcesses = new Map();
 const activeCastTokens = new Map();
 const activeDvrJobs = new Map();
 const activeRedirectStreams = new Map();
-const detectedHardware = {};
 
 const shared = { db, getSettings, saveSettings, sseClients, activeStreamProcesses, activeCastTokens, activeDvrJobs, activeRedirectStreams, vapidKeys, webpush, detectedHardware };
 
