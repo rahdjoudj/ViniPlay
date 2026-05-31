@@ -124,7 +124,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     const profileArgs = (cmdTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(a => a.replace(/^"|"$/g, ''));
 
     const ffmpegArgs = [
-      '-v', 'level+error',
+      '-v', 'level+warning',
       ...profileArgs,
       '-f', 'hls',
       '-hls_time', String(HLS_SEGMENT_TIME),
@@ -141,17 +141,32 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     });
 
     const startTime = Date.now();
-    let lastStderrLog = 0;
+    let stderrLineCount = 0;
+    let noOutputTimer;
+
+    ffmpeg.on('spawn', () => {
+      logger.info({ streamKey, pid: ffmpeg.pid }, '[hls] ffmpeg process spawned');
+      // If no stderr within 3s, log a diagnostic
+      noOutputTimer = setTimeout(() => {
+        if (stderrLineCount === 0) {
+          logger.warn({ streamKey, pid: ffmpeg.pid, elapsedMs: Date.now() - startTime }, '[hls] No stderr from ffmpeg after 3s — process may be hung or binary missing');
+        }
+      }, 3000);
+      noOutputTimer.unref();
+    });
+
     ffmpeg.stderr.on('data', (data) => {
       const msg = data.toString().trim();
       if (!msg) return;
-      const now = Date.now();
-      // Rate-limit non-error stderr to once per 5s; always log errors immediately
-      const isError = /error|fail|invalid|unable|cannot|refused|timed?out/i.test(msg);
-      if (isError || now - lastStderrLog > 5000) {
-        lastStderrLog = now;
-        logger[isError ? 'warn' : 'info']({ streamKey, msg: msg.slice(0, 300) }, isError ? '[hls] ffmpeg stderr (warning)' : '[hls] ffmpeg');
-      }
+      stderrLineCount++;
+      const isError = /error|fail|invalid|unable|cannot|refused|timed?out|denied|not found|no such/i.test(msg);
+      logger[isError ? 'warn' : 'info']({ streamKey, line: stderrLineCount, msg: msg.slice(0, 400) }, isError ? '[hls] ffmpeg stderr (warning)' : '[hls] ffmpeg');
+    });
+
+    // Also capture stdout — ffmpeg occasionally writes progress there
+    ffmpeg.stdout.on('data', (data) => {
+      const msg = data.toString().trim();
+      if (msg) logger.debug({ streamKey, msg: msg.slice(0, 200) }, '[hls] ffmpeg stdout');
     });
 
     const streamInfo = {
@@ -191,8 +206,13 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     broadcastAdminActivity(sseClients);
 
     ffmpeg.on('close', (code, signal) => {
+      if (noOutputTimer) clearTimeout(noOutputTimer);
       const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-      logger.info({ streamKey, code, signal, durationSec: duration }, '[hls] ffmpeg process exited');
+      logger[code === 0 ? 'info' : 'warn']({
+        streamKey, code, signal, durationSec: duration,
+        stderrLines: stderrLineCount,
+        hadOutput: stderrLineCount > 0,
+      }, code === 0 ? '[hls] ffmpeg exited cleanly' : '[hls] ffmpeg exited with error');
       hlsStreams.delete(streamKey);
       hlsStreamByDir.delete(streamId);
       activeStreamProcesses.delete(streamKey);
@@ -201,7 +221,8 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     });
 
     ffmpeg.on('error', (err) => {
-      logger.error({ streamKey, err: err.message }, '[hls] ffmpeg spawn error');
+      if (noOutputTimer) clearTimeout(noOutputTimer);
+      logger.error({ streamKey, err: err.message, code: err.code, pid: ffmpeg.pid }, '[hls] ffmpeg spawn error (binary missing or not executable?)');
     });
 
     ffmpeg.on('spawn', () => {
