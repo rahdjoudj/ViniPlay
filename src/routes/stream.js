@@ -185,7 +185,24 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     hlsStreams.set(streamKey, streamInfo);
     hlsStreamByDir.set(streamId, streamKey);
 
-    // Register in shared activeStreamProcesses so admins/janitor can see HLS activity
+    // Watchdog: monitor playlist file for segment production
+    let lastPlaylistSize = fs.statSync(playlistPath).size;
+    let segmentWatchCount = 0;
+    const segmentWatchdog = setInterval(() => {
+      segmentWatchCount++;
+      try {
+        const stat = fs.statSync(playlistPath);
+        const segCount = fs.readdirSync(streamDir).filter(f => f.endsWith('.ts')).length;
+        if (stat.size !== lastPlaylistSize || segCount > 0) {
+          lastPlaylistSize = stat.size;
+          logger.info({ streamKey, playlistBytes: stat.size, segmentsOnDisk: segCount, elapsedS: ((Date.now() - startTime) / 1000).toFixed(0) }, '[hls] Playlist updated — segments being produced');
+        } else if (segmentWatchCount === 5) {
+          // ~10s with no output — something is wrong
+          logger.warn({ streamKey, pid: ffmpeg.pid, elapsedS: ((Date.now() - startTime) / 1000).toFixed(0), stderrLines: stderrLineCount }, '[hls] No segments produced after 10s — input may be dead or codec incompatible');
+        }
+      } catch {}
+    }, 2000);
+    segmentWatchdog.unref();
     const activeInfo = {
       process: ffmpeg,
       references: 1,
@@ -207,6 +224,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
 
     ffmpeg.on('close', (code, signal) => {
       if (noOutputTimer) clearTimeout(noOutputTimer);
+      clearInterval(segmentWatchdog);
       const duration = ((Date.now() - startTime) / 1000).toFixed(1);
       logger[code === 0 ? 'info' : 'warn']({
         streamKey, code, signal, durationSec: duration,
@@ -222,6 +240,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
 
     ffmpeg.on('error', (err) => {
       if (noOutputTimer) clearTimeout(noOutputTimer);
+      clearInterval(segmentWatchdog);
       logger.error({ streamKey, err: err.message, code: err.code, pid: ffmpeg.pid }, '[hls] ffmpeg spawn error (binary missing or not executable?)');
     });
 
