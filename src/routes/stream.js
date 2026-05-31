@@ -58,6 +58,15 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     const info = streamKey ? hlsStreams.get(streamKey) : null;
     if (info) info.lastAccess = Date.now();
 
+    // Debug: log playlist content on first few requests
+    if (info && !info._playlistLogged) {
+      try {
+        const content = fs.readFileSync(playlistPath, 'utf-8');
+        logger.info({ streamKey, playlist: content.slice(0, 500) }, '[hls] Playlist content (first serve)');
+        info._playlistLogged = true;
+      } catch {}
+    }
+
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -108,6 +117,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       existing.references++;
       existing.lastAccess = Date.now();
       logger.debug({ streamKey, references: existing.references }, '[hls] Reusing existing stream');
+      res.setHeader('Cache-Control', 'no-store');
       return res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
     }
 
@@ -274,6 +284,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       logger.debug({ streamKey, pid: ffmpeg.pid }, '[hls] ffmpeg process spawned');
     });
 
+    res.setHeader('Cache-Control', 'no-store');
     res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
 
     req.on('close', () => {
