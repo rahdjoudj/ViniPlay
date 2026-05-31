@@ -2368,6 +2368,10 @@
                 <div id="subtitle-track-list" class="py-2"></div>
             </div>
             <div id="video-content" class="flex-grow p-1 bg-black relative">
+                <div id="video-loading" class="hidden absolute inset-0 flex flex-col items-center justify-center bg-black z-10">
+                    <div id="video-loading-spinner" class="w-12 h-12 border-4 border-gray-700 border-t-blue-500 rounded-full animate-spin mb-4"></div>
+                    <p id="video-loading-text" class="text-gray-400 text-sm">Starting stream...</p>
+                </div>
                 <video id="videoElement" controls autoplay class="w-full h-full"></video>
                 <!-- NEW: Stream Info Overlay -->
                 <div id="stream-info-overlay" class="hidden">

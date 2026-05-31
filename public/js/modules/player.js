@@ -20,7 +20,21 @@ let currentChannelInfo = null;
 let retryCount = 0;
 let retryTimeout = null;
 let removeKeyboardShortcuts = null;
+let _streamLoading = false;
 const MAX_RETRIES = 3;
+
+function showLoading(channelName) {
+  _streamLoading = true;
+  if (UIElements.videoLoadingText) UIElements.videoLoadingText.textContent = `Loading ${channelName || 'stream'}...`;
+  if (UIElements.videoLoading) UIElements.videoLoading.classList.remove('hidden');
+  openModal(UIElements.videoModal);
+  if (UIElements.videoTitle) UIElements.videoTitle.textContent = channelName || '';
+}
+
+function hideLoading() {
+  _streamLoading = false;
+  if (UIElements.videoLoading) UIElements.videoLoading.classList.add('hidden');
+}
 
 function handleStreamError() {
   if (retryCount >= MAX_RETRIES) {
@@ -54,6 +68,7 @@ export async function forceRefreshStream() {
 }
 
 export const stopAndCleanupPlayer = async () => {
+  hideLoading();
   if (currentRedirectHistoryId) {
     stopRedirectStream(currentRedirectHistoryId);
     currentRedirectHistoryId = null;
@@ -96,8 +111,17 @@ function updateStreamInfo({ resolution, buffer, fps, dropped, bandwidth, videoCo
 }
 
 export const playChannel = async (url, name, channelId) => {
+  // Guard against concurrent calls — if already loading, stop current and restart
+  if (_streamLoading) {
+    if (appState.player) { appState.player.stop(); appState.player = null; }
+    if (streamInfoInterval) { clearInterval(streamInfoInterval); streamInfoInterval = null; }
+    await stopAndCleanupPlayer();
+  }
   if (!retryTimeout) retryCount = 0;
   currentChannelInfo = { url, name, channelId };
+
+  // Show loading state immediately — ffmpeg may take several seconds
+  if (!castState.isCasting) showLoading(name);
 
   if (channelId) {
     const prev = Array.isArray(guideState.settings.recentChannels) ? guideState.settings.recentChannels : [];
@@ -109,6 +133,7 @@ export const playChannel = async (url, name, channelId) => {
   const profileId = guideState.settings.activeStreamProfileId;
   const userAgentId = guideState.settings.activeUserAgentId;
   if (!profileId || !userAgentId) {
+    hideLoading();
     showNotification('Active stream profile or user agent not set. Please check settings.', true);
     return;
   }
@@ -116,7 +141,7 @@ export const playChannel = async (url, name, channelId) => {
   if (currentRedirectHistoryId) { stopRedirectStream(currentRedirectHistoryId); currentRedirectHistoryId = null; }
 
   const profile = (guideState.settings.streamProfiles || []).find(p => p.id === profileId);
-  if (!profile) return showNotification('Stream profile not found.', true);
+  if (!profile) { hideLoading(); return showNotification('Stream profile not found.', true); }
 
   if (profile.command === 'redirect') {
     const channel = guideState.channels.find(c => c.id === channelId);
@@ -130,9 +155,9 @@ export const playChannel = async (url, name, channelId) => {
   const logo = proxyImageUrl(channel?.logo) || '';
 
   if (castState.isCasting) {
+    hideLoading();
     const absUrl = streamUrl.startsWith('http') ? streamUrl : `${window.location.origin}${streamUrl}`;
     loadMedia(absUrl, name, logo);
-    openModal(UIElements.videoModal);
     return;
   }
 
@@ -143,31 +168,39 @@ export const playChannel = async (url, name, channelId) => {
   if (appState.player) { appState.player.stop(); appState.player = null; }
   if (streamInfoInterval) { clearInterval(streamInfoInterval); streamInfoInterval = null; }
 
-  appState.player = await createPlayer({
-    url: streamUrl,
-    video: UIElements.videoElement,
-    isLive: true,
-    onError: (type, detail, fatal) => {
-      if (fatal && (type === 'NetworkError' || type === 'MediaError')) {
-        if (appState.player) handleStreamError();
-      } else if (fatal) {
-        showNotification(`Player Error: ${detail}`, true);
-        stopAndCleanupPlayer();
-      }
-    },
-    onRecovered: () => {
-      retryCount = 0;
-      if (retryTimeout) { clearTimeout(retryTimeout); retryTimeout = null; }
-    },
-    onStats: (stats) => updateStreamInfo(stats),
-  });
+  try {
+    appState.player = await createPlayer({
+      url: streamUrl,
+      video: UIElements.videoElement,
+      isLive: true,
+      onError: (type, detail, fatal) => {
+        if (fatal && (type === 'NetworkError' || type === 'MediaError')) {
+          if (appState.player) handleStreamError();
+        } else if (fatal) {
+          showNotification(`Player Error: ${detail}`, true);
+          stopAndCleanupPlayer();
+        }
+      },
+      onRecovered: () => {
+        retryCount = 0;
+        if (retryTimeout) { clearTimeout(retryTimeout); retryTimeout = null; }
+      },
+      onStats: (stats) => updateStreamInfo(stats),
+    });
+  } catch (err) {
+    hideLoading();
+    showNotification(`Could not start stream: ${err.message}`, true);
+    return;
+  }
 
   if (!appState.player) {
+    hideLoading();
     showNotification('Your browser does not support the required playback technology.', true);
     return;
   }
 
-  openModal(UIElements.videoModal);
+  hideLoading();
+  // Modal is already open from showLoading() — keep it open
   UIElements.videoTitle.textContent = name;
   UIElements.videoElement.volume = parseFloat(localStorage.getItem('iptvPlayerVolume') || 0.5);
 
