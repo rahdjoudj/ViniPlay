@@ -290,8 +290,26 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       logger.debug({ streamKey, pid: ffmpeg.pid }, '[hls] ffmpeg process spawned');
     });
 
+    // Wait for ffmpeg to write the first segment before returning the URL.
+    // HLS.js gives up after ~3 empty polls — we must not hand it an empty playlist.
+    const playlistUrl = `/stream/hls/${streamId}/stream.m3u8`;
+    const maxWait = 15_000;
+    const pollMs = 500;
+    let waited = 0;
+    const waitForPlaylist = () => new Promise((resolve) => {
+      const check = () => {
+        try {
+          if (fs.existsSync(playlistPath) && fs.statSync(playlistPath).size > 60) return resolve();
+        } catch {}
+        waited += pollMs;
+        if (waited >= maxWait) return resolve(); // give up, return stub
+        setTimeout(check, pollMs);
+      };
+      check();
+    });
+    await waitForPlaylist();
     res.setHeader('Cache-Control', 'no-store');
-    res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
+    res.json({ playlistUrl, type: 'hls' });
 
     req.on('close', () => {
       const info = hlsStreams.get(streamKey);
