@@ -140,6 +140,8 @@ logger.info(hwKeys.length ? { detected: detectedHardware } : { detected: 'none' 
 
 // --- Default settings ---
 const DEFAULT_SETTINGS = {
+  m3uSources: [],
+  epgSources: [],
   streamProfiles: [
     { id: 'redirect', name: 'Redirect / Direct Play', command: 'redirect', isDefault: false },
     { id: 'ffmpeg-default', name: 'ffmpeg (Software — Copy Codecs)', command: '-user_agent "{userAgent}" -re -i "{streamUrl}" -c copy -f mpegts pipe:1', isDefault: true },
@@ -284,6 +286,9 @@ function getSettings() {
     if (fileExists) {
       raw = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
     }
+    // Ensure essential array keys always exist so routes don't crash on undefined
+    if (!raw.m3uSources) raw.m3uSources = [];
+    if (!raw.epgSources) raw.epgSources = [];
     if (!_settingsBootstrapped) {
       const hadProfiles = (raw.streamProfiles || []).length > 0;
       const hadAgents = (raw.userAgents || []).length > 0;
