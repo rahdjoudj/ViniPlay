@@ -50,100 +50,7 @@ async function fetchAndDisplayAppVersion() {
 }
 
 
-// --- NEW: Hardware Acceleration ---
-
-/**
- * Adds default GPU-based profiles to settings if they don't already exist.
- * @param {object} hardware - The hardware detection object from the backend.
- */
-async function addDefaultGpuProfiles(hardware) {
-    const settings = guideState.settings;
-    let changesMade = false;
-    let settingsToSave = {};
-
-    const streamProfiles = settings.streamProfiles || [];
-    const dvrProfiles = settings.dvr?.recordingProfiles || [];
-    const castProfiles = settings.castProfiles || [];
-
-    // NVIDIA Profiles
-    if (hardware.nvidia) {
-        if (!streamProfiles.some(p => p.id === 'ffmpeg-nvidia')) {
-            streamProfiles.push({ id: 'ffmpeg-nvidia', name: 'ffmpeg (NVIDIA NVENC)', command: '-user_agent "{userAgent}" -re -i "{streamUrl}" -c:v h264_nvenc -preset p6 -tune hq -c:a copy -f mpegts pipe:1', isDefault: true });
-            changesMade = true;
-        }
-        if (!dvrProfiles.some(p => p.id === 'dvr-mp4-nvidia')) {
-            dvrProfiles.push({ id: 'dvr-mp4-nvidia', name: 'NVIDIA NVENC MP4 (H.264/AAC)', command: '-user_agent "{userAgent}" -i "{streamUrl}" -c:v h264_nvenc -preset p6 -tune hq -c:a aac -b:a 128k -movflags +faststart -f mp4 "{filePath}"', isDefault: true });
-            changesMade = true;
-        }
-        if (!castProfiles.some(p => p.id === 'cast-nvidia')) {
-            castProfiles.push({ id: 'cast-nvidia', name: 'Cast (NVIDIA NVENC)', command: '-user_agent "{userAgent}" -i "{streamUrl}" -c:v h264_nvenc -preset p6 -tune hq -c:a aac -b:a 128k -movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1', isDefault: false });
-            changesMade = true;
-        }
-    }
-
-    // Intel QSV Profiles
-    if (hardware.intel_qsv) {
-        if (!streamProfiles.some(p => p.id === 'ffmpeg-intel')) {
-            streamProfiles.push({ id: 'ffmpeg-intel', name: 'ffmpeg (Intel QSV)', command: '-hwaccel qsv -c:v h264_qsv -i "{streamUrl}" -c:v h264_qsv -preset medium -c:a aac -b:a 128k -f mpegts pipe:1', isDefault: false });
-            changesMade = true;
-        }
-        if (!dvrProfiles.some(p => p.id === 'dvr-mp4-intel')) {
-            dvrProfiles.push({ id: 'dvr-mp4-intel', name: 'Intel QSV MP4 (H.264/AAC)', command: '-hwaccel qsv -c:v h264_qsv -i "{streamUrl}" -c:v h264_qsv -preset medium -c:a aac -b:a 128k -movflags +faststart -f mp4 "{filePath}"', isDefault: false });
-            changesMade = true;
-        }
-        if (!castProfiles.some(p => p.id === 'cast-intel')) {
-            castProfiles.push({ id: 'cast-intel', name: 'Cast (Intel QSV)', command: '-hwaccel qsv -c:v h264_qsv -i "{streamUrl}" -c:v h264_qsv -preset medium -c:a aac -b:a 128k -movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1', isDefault: false });
-            changesMade = true;
-        }
-    }
-
-    // Intel VAAPI Profiles
-    if (hardware.intel_vaapi) {
-        if (!streamProfiles.some(p => p.id === 'ffmpeg-vaapi')) {
-            streamProfiles.push({ id: 'ffmpeg-vaapi', name: 'ffmpeg (VA-API) Intel', command: '-hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -vf "format=nv12|vaapi,hwupload" -c:v h264_vaapi -preset medium -c:a aac -b:a 128k -f mpegts pipe:1', isDefault: false });
-            changesMade = true;
-        }
-        if (!dvrProfiles.some(p => p.id === 'dvr-mp4-vaapi')) {
-            dvrProfiles.push({ id: 'dvr-mp4-vaapi', name: 'Intel VA-API MP4 (H.264/AAC)', command: '-hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -vf \'format=nv12,hwupload\' -c:v h264_vaapi -preset medium -c:a aac -b:a 128k -movflags +faststart -f mp4 "{filePath}"', isDefault: false });
-            changesMade = true;
-        }
-        if (!castProfiles.some(p => p.id === 'cast-vaapi')) {
-            castProfiles.push({ id: 'cast-vaapi', name: 'Cast (VA-API Intel)', command: '-hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -vf "format=nv12|vaapi,hwupload" -c:v h264_vaapi -c:a aac -b:a 128k -movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1', isDefault: false });
-            changesMade = true;
-        }
-    }
-
-    // Radeon/AMD Profiles
-    if (hardware.radeon_vaapi) {
-        if (!streamProfiles.some(p => p.id === 'ffmpeg-vaapi-amd')) {
-            streamProfiles.push({ id: 'ffmpeg-vaapi-amd', name: 'ffmpeg (VA-API) Radeon/AMD', command: '-vaapi_device /dev/dri/renderD128 -hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -c:v h264_vaapi -c:a aac -b:a 128k -f mpegts pipe:1', isDefault: false });
-            changesMade = true;
-        }
-        if (!dvrProfiles.some(p => p.id === 'dvr-mp4-radeon-vaapi')) {
-            dvrProfiles.push({ id: 'dvr-mp4-radeon-vaapi', name: 'Radeon/AMD VA-API MP4 (H.264/AAC)', command: '-vaapi_device /dev/dri/renderD128 -hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -c:v h264_vaapi -preset medium -c:a aac -b:a 128k -movflags +faststart -f mp4 "{filePath}"', isDefault: false });
-            changesMade = true;
-        }
-        if (!castProfiles.some(p => p.id === 'cast-vaapi-amd')) {
-            castProfiles.push({ id: 'cast-vaapi-amd', name: 'Cast (VA-API Radeon/AMD)', command: '-vaapi_device /dev/dri/renderD128 -hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -c:v h264_vaapi -c:a aac -b:a 128k -movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1', isDefault: false });
-            changesMade = true;
-        }
-    }
-
-    if (changesMade) {
-        console.log('[SETTINGS] New GPU profiles detected. Saving to settings...');
-        settingsToSave.streamProfiles = streamProfiles;
-        settingsToSave.dvr = { ...settings.dvr, recordingProfiles: dvrProfiles };
-        settingsToSave.castProfiles = castProfiles;
-
-        const updatedSettings = await saveGlobalSetting(settingsToSave);
-        if (updatedSettings) {
-            guideState.settings = updatedSettings;
-            showNotification('Detected GPU profiles have been added!', false, 4000);
-            // We don't need to call updateUIFromSettings here because the function that called this one will do it.
-        }
-    }
-}
-
+// --- Hardware Acceleration (display only — server handles profile creation) ---
 
 /**
  * Populates the hardware info modal with details and example commands.
@@ -261,8 +168,7 @@ async function handleHardwareDetection() {
         if (hardware.nvidia || hardware.intel_qsv || hardware.intel_vaapi || hardware.radeon_vaapi) {
             UIElements.hardwareInfoBtn.classList.remove('hidden');
             populateHardwareInfoModal(hardware);
-            // This will check for missing profiles, save them, and trigger a UI refresh if needed.
-            await addDefaultGpuProfiles(hardware);
+            // GPU profiles are created server-side at startup — frontend never auto-saves settings
         }
         return hardware;
     } else {
