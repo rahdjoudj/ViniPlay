@@ -3,6 +3,8 @@ import { spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import http from 'http';
+import https from 'https';
 import { logger } from '../config/logger.js';
 import { DATA_DIR, LIVE_CHANNELS_M3U_PATH } from '../config/index.js';
 import { broadcastAdminUpdate } from './_sse-utils.js';
@@ -79,7 +81,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
   });
 
   // Start or get an HLS stream
-  router.get('/hls', (req, res) => {
+  router.get('/hls', async (req, res) => {
     const { url, profileId, userAgentId } = req.query;
     const userId = req.session?.userId;
     const username = req.session?.username;
@@ -105,6 +107,28 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       existing.lastAccess = Date.now();
       logger.debug({ streamKey, references: existing.references }, '[hls] Reusing existing stream');
       return res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
+    }
+
+    // Pre-flight: quick HEAD check to detect auth failures before spawning ffmpeg
+    try {
+      const mod = url.startsWith('https') ? https : http;
+      await new Promise((resolve, reject) => {
+        const u = new URL(url);
+        const probe = mod.request({ host: u.hostname, port: u.port || (url.startsWith('https') ? 443 : 80), path: u.pathname + u.search, method: 'HEAD', timeout: 8000, headers: { 'User-Agent': ua } }, (r) => {
+          logger.info({ streamKey, status: r.statusCode }, `[hls] Pre-flight: ${r.statusCode}`);
+          r.resume();
+          if (r.statusCode === 401 || r.statusCode === 403) {
+            return reject(new Error(`Source returned ${r.statusCode} — authentication required`));
+          }
+          resolve();
+        });
+        probe.on('error', reject);
+        probe.on('timeout', () => { probe.destroy(); reject(new Error('Source not reachable (timeout)')); });
+        probe.end();
+      });
+    } catch (preflightErr) {
+      logger.warn({ streamKey, err: preflightErr.message }, '[hls] Pre-flight check failed');
+      return res.status(502).json({ error: `Cannot reach stream source: ${preflightErr.message}` });
     }
 
     // Create stream directory and an initial empty playlist so HLS.js never gets 404
