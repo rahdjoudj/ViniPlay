@@ -38,18 +38,21 @@ export function createAuthRoutes({ db }) {
 
   router.post('/login', (req, res) => {
     const { username, password } = req.body;
+    const ip = req.clientIp || req.ip;
     if (!username || !password) {
+      logger.warn({ ip, hasUser: !!username, hasPass: !!password }, '[auth] Login rejected — missing credentials');
       return res.status(400).json({ error: 'Username and password are required.' });
     }
     const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
     if (!user || !bcrypt.compareSync(password, user.password)) {
+      logger.warn({ ip, username, found: !!user }, '[auth] Login failed — invalid credentials');
       return res.status(401).json({ error: 'Invalid username or password.' });
     }
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.isAdmin = !!user.isAdmin;
     req.session.canUseDvr = !!user.canUseDvr || !!user.isAdmin;
-    logger.info({ userId: user.id, username: user.username }, 'User logged in');
+    logger.info({ userId: user.id, username: user.username, ip, isAdmin: !!user.isAdmin, ua: (req.headers['user-agent'] || '').slice(0, 80) }, '[auth] Login successful');
     res.json({
       isLoggedIn: true,
       user: {
@@ -72,6 +75,7 @@ export function createAuthRoutes({ db }) {
     if (req.session?.userId) {
       const user = db.prepare('SELECT id, username, isAdmin, canUseDvr FROM users WHERE id = ?').get(req.session.userId);
       if (user) {
+        logger.debug({ userId: user.id, username: user.username }, '[auth] Status check — authenticated');
         return res.json({
           isLoggedIn: true,
           user: {
@@ -82,7 +86,9 @@ export function createAuthRoutes({ db }) {
           },
         });
       }
+      logger.warn({ sessionUserId: req.session.userId }, '[auth] Status check — session has userId but user not in DB');
     }
+    logger.debug('[auth] Status check — not authenticated');
     res.json({ isLoggedIn: false });
   });
 

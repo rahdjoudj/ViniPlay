@@ -3,6 +3,7 @@ import { logger } from '../config/logger.js';
 
 export function requireAuth(req, res, next) {
   if (!req.session?.userId) {
+    logger.debug({ url: req.originalUrl, ip: req.clientIp, hasSession: !!req.session }, '[auth] requireAuth — no session userId');
     return res.status(401).json({ error: 'Authentication required.' });
   }
 
@@ -10,7 +11,7 @@ export function requireAuth(req, res, next) {
   const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.session.userId);
 
   if (!user) {
-    logger.warn({ userId: req.session.userId }, 'User from session not found in DB');
+    logger.warn({ userId: req.session.userId, url: req.originalUrl }, '[auth] requireAuth — user from session not found in DB');
     req.session.destroy();
     res.clearCookie('connect.sid');
     return res.status(401).json({ error: 'User account no longer exists. Please log in again.' });

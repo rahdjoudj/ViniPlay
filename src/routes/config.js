@@ -118,6 +118,19 @@ export function createConfigRoutes({ db, getSettings }) {
       }
       config.settings.userPermissionsSignature = sig;
 
+      const m3uLen = config.m3uContent ? config.m3uContent.length : 0;
+      const epgChannels = Object.keys(config.epgContent).length;
+      logger.info({
+        userId: req.session.userId,
+        m3uBytes: m3uLen,
+        epgChannels,
+        vodMovies: config.vodMovies.length,
+        vodSeries: config.vodSeries.length,
+        hasStreamProfiles: (config.settings.streamProfiles || []).length > 0,
+        activeProfileId: config.settings.activeStreamProfileId,
+        activeAgentId: config.settings.activeUserAgentId,
+      }, '[config] Served /api/config');
+
       res.json(config);
     } catch (err) {
       logger.error({ err }, '/api/config failed');

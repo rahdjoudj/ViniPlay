@@ -348,9 +348,25 @@ app.use(
 
 // --- HTTP request logging ---
 app.use((req, res, next) => {
-  if (req.path === '/api/events') return next();
   req.clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-  logger.debug({ method: req.method, url: req.originalUrl, ip: req.clientIp }, 'request');
+  if (req.path === '/api/events') return next(); // SSE — too noisy
+
+  const start = Date.now();
+  const origEnd = res.end;
+  res.end = function (...args) {
+    const duration = Date.now() - start;
+    const level = res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info';
+    logger[level]({
+      method: req.method,
+      url: req.originalUrl,
+      status: res.statusCode,
+      durationMs: duration,
+      ip: req.clientIp,
+      userId: req.session?.userId,
+      ua: (req.headers['user-agent'] || '').slice(0, 80) || undefined,
+    }, 'request');
+    origEnd.apply(this, args);
+  };
   next();
 });
 
