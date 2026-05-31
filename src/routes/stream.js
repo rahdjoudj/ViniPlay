@@ -60,10 +60,11 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
 
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.sendFile(playlistPath);
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.sendFile(playlistPath, { cacheControl: false, lastModified: false, etag: false });
   });
 
-  // Serve HLS segments (.ts)
+  // Serve HLS segments (.ts) — can be cached briefly since they're immutable
   router.get('/hls/:streamId/:segment', (req, res) => {
     const segPath = path.resolve(HLS_DIR, req.params.streamId, req.params.segment);
     if (!segPath.startsWith(HLS_DIR + path.sep)) return res.status(403).send('Forbidden');
@@ -77,7 +78,8 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
 
     res.setHeader('Content-Type', 'video/mp2t');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.sendFile(segPath);
+    res.setHeader('Cache-Control', 'max-age=10');
+    res.sendFile(segPath, { cacheControl: false });
   });
 
   // Start or get an HLS stream
