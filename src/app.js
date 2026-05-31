@@ -51,6 +51,7 @@ function saveSettings(settings) {
 function detectHardware() {
   const hardware = {};
   try {
+    // Step 1: scan /dev/dri for render devices
     const driDevices = [];
     try {
       const driDir = '/dev/dri';
@@ -59,57 +60,83 @@ function detectHardware() {
         for (const e of entries) {
           if (e.startsWith('renderD')) driDevices.push(path.join(driDir, e));
         }
+        logger.info({ driDir, entries, renderDevices: driDevices }, '[hw-detect] /dev/dri scan');
+      } else {
+        logger.info('[hw-detect] /dev/dri does not exist — no DRM devices');
       }
-    } catch {}
+    } catch (e) {
+      logger.warn({ err: e }, '[hw-detect] Could not scan /dev/dri');
+    }
 
     if (driDevices.length > 0) {
+      // Step 2: run vainfo to identify GPU vendor
       try {
         const out = execSync('vainfo 2>/dev/null', { encoding: 'utf-8', timeout: 5000 });
         const outLower = out.toLowerCase();
+        logger.info({ vainfoFirstLine: out.trim().split('\n')[0] }, '[hw-detect] vainfo output');
         if (outLower.includes('intel') || outLower.includes('i965') || outLower.includes('i915')) {
           hardware.intel_qsv = 'Intel Quick Sync Video';
           hardware.intel_vaapi = 'Intel VA-API';
+          logger.info('[hw-detect] Identified Intel GPU via vainfo');
         } else if (outLower.includes('amd') || outLower.includes('radeon') || outLower.includes('amdgpu')) {
           hardware.radeon_vaapi = 'AMD Radeon VA-API';
+          logger.info('[hw-detect] Identified AMD/Radeon GPU via vainfo');
         } else {
           hardware.intel_vaapi = 'Intel VA-API (detected)';
+          logger.info({ outFirstChars: out.slice(0, 120) }, '[hw-detect] DRM device present but unknown vendor — defaulting to Intel VA-API');
         }
-      } catch {
+      } catch (vainfoErr) {
+        // Step 3: vainfo failed — try lsmod for driver names
+        logger.warn({ err: vainfoErr.message }, '[hw-detect] vainfo failed, trying lsmod fallback');
         try {
           const mods = execSync('lsmod 2>/dev/null', { encoding: 'utf-8', timeout: 3000 });
           if (mods.includes('i915') || mods.includes('i965')) {
             hardware.intel_qsv = 'Intel Quick Sync Video';
             hardware.intel_vaapi = 'Intel VA-API';
+            logger.info('[hw-detect] Identified Intel GPU via lsmod (i915/i965)');
           } else if (mods.includes('amdgpu') || mods.includes('radeon')) {
             hardware.radeon_vaapi = 'AMD Radeon VA-API';
+            logger.info('[hw-detect] Identified AMD GPU via lsmod (amdgpu/radeon)');
           } else {
             hardware.intel_vaapi = 'Intel VA-API';
+            logger.info('[hw-detect] DRM render node exists but unknown vendor — defaulting to Intel VA-API');
           }
-        } catch {
+        } catch (lsmodErr) {
           hardware.intel_vaapi = 'Intel VA-API';
+          logger.warn({ err: lsmodErr.message }, '[hw-detect] lsmod also failed — defaulting to Intel VA-API');
         }
       }
+    } else {
+      logger.info('[hw-detect] No DRM render devices found — no VAAPI/QSV hardware');
     }
 
+    // Step 4: check for NVIDIA
     try {
       const nvidiaSmi = execSync('nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null', { encoding: 'utf-8', timeout: 5000 }).trim();
-      if (nvidiaSmi) hardware.nvidia = nvidiaSmi;
-    } catch {}
+      if (nvidiaSmi) {
+        hardware.nvidia = nvidiaSmi;
+        logger.info({ gpu: nvidiaSmi }, '[hw-detect] NVIDIA GPU detected via nvidia-smi');
+      }
+    } catch {
+      logger.debug('[hw-detect] nvidia-smi not found or failed — no NVIDIA GPU');
+    }
     if (!hardware.nvidia) {
       try {
         if (fs.existsSync('/dev/nvidia0') || fs.existsSync('/dev/nvidiactl')) {
           hardware.nvidia = 'NVIDIA GPU';
+          logger.info('[hw-detect] NVIDIA GPU detected via /dev/nvidia* device files');
         }
       } catch {}
     }
   } catch (err) {
-    logger.warn({ err }, 'Hardware detection encountered an error');
+    logger.warn({ err }, '[hw-detect] Hardware detection encountered an unexpected error');
   }
   return hardware;
 }
 
 const detectedHardware = detectHardware();
-logger.info({ ...detectedHardware }, 'Hardware detection complete');
+const hwKeys = Object.keys(detectedHardware);
+logger.info(hwKeys.length ? { detected: detectedHardware } : { detected: 'none' }, 'Hardware detection complete');
 
 // --- Default settings ---
 const DEFAULT_SETTINGS = {
@@ -253,14 +280,28 @@ let _settingsBootstrapped = false;
 function getSettings() {
   try {
     let raw = {};
-    if (fs.existsSync(SETTINGS_PATH)) {
+    const fileExists = fs.existsSync(SETTINGS_PATH);
+    if (fileExists) {
       raw = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
     }
     if (!_settingsBootstrapped) {
+      const hadProfiles = (raw.streamProfiles || []).length > 0;
+      const hadAgents = (raw.userAgents || []).length > 0;
+      const hadActiveProfile = !!raw.activeStreamProfileId;
+      const hadActiveAgent = !!raw.activeUserAgentId;
       const bootstrapped = initializeSettings(raw, detectedHardware);
       if (JSON.stringify(bootstrapped) !== JSON.stringify(raw)) {
         saveSettings(bootstrapped);
-        logger.info('Settings bootstrapped with defaults');
+        logger.info({
+          fileExisted: fileExists,
+          addedProfiles: bootstrapped.streamProfiles.length - (raw.streamProfiles || []).length,
+          addedAgents: bootstrapped.userAgents.length - (raw.userAgents || []).length,
+          fixedActiveProfile: !hadActiveProfile && !!bootstrapped.activeStreamProfileId,
+          fixedActiveAgent: !hadActiveAgent && !!bootstrapped.activeUserAgentId,
+          gpuProfiles: bootstrapped.streamProfiles.filter(p => ['ffmpeg-nvidia', 'ffmpeg-intel', 'ffmpeg-vaapi', 'ffmpeg-vaapi-amd'].includes(p.id)).map(p => p.id),
+        }, 'Settings bootstrapped with defaults');
+      } else {
+        logger.info({ fileExisted: fileExists, profileCount: bootstrapped.streamProfiles.length, agentCount: bootstrapped.userAgents.length }, 'Settings already complete — no bootstrap needed');
       }
       _settingsBootstrapped = true;
       return bootstrapped;

@@ -2,15 +2,32 @@ import { Router } from 'express';
 import { logger } from '../config/logger.js';
 import { requireAuth } from '../middleware/auth.js';
 
+// Deep-merge `patch` into `base` — arrays at same key replace entirely
+function deepMerge(base, patch) {
+  const result = { ...base };
+  for (const key of Object.keys(patch)) {
+    const pv = patch[key];
+    const bv = result[key];
+    if (pv && typeof pv === 'object' && !Array.isArray(pv) && bv && typeof bv === 'object' && !Array.isArray(bv)) {
+      result[key] = deepMerge(bv, pv);
+    } else {
+      result[key] = pv;
+    }
+  }
+  return result;
+}
+
 export function createSettingsRoutes({ db, getSettings, saveSettings }) {
   const router = Router();
 
   router.post('/save/settings', requireAuth, (req, res) => {
     try {
-      saveSettings(req.body);
-      const settings = getSettings();
-      logger.info({ userId: req.session.userId }, 'Global settings saved');
-      res.json({ success: true, settings });
+      // Merge with existing settings to prevent partial saves from clobbering other keys
+      const existing = getSettings();
+      const merged = deepMerge(existing, req.body);
+      saveSettings(merged);
+      logger.info({ userId: req.session.userId, keys: Object.keys(req.body) }, 'Global settings saved');
+      res.json({ success: true, settings: merged });
     } catch (err) {
       logger.error({ err }, 'Failed to save settings');
       res.status(500).json({ error: 'Failed to save settings.' });
