@@ -107,8 +107,11 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     if (!userId) return res.status(401).json({ error: 'Authentication required.' });
 
     const settings = getSettings();
-    const profile = (settings.streamProfiles || []).find(p => p.id === profileId);
-    const userAgent = (settings.userAgents || []).find(ua => ua.id === userAgentId);
+    // Use specified profile/userAgent, or fall back to the active ones from settings
+    const effectiveProfileId = profileId || settings.activeStreamProfileId;
+    const effectiveAgentId = userAgentId || settings.activeUserAgentId;
+    const profile = (settings.streamProfiles || []).find(p => p.id === effectiveProfileId);
+    const userAgent = (settings.userAgents || []).find(ua => ua.id === effectiveAgentId);
 
     // Build ffmpeg args — copy codecs to avoid re-encode, output HLS
     const ua = userAgent?.value || 'VLC/3.0';
