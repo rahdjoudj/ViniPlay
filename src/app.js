@@ -18,6 +18,7 @@ import { processAndMergeSources, updateAndScheduleSourceRefreshes } from './serv
 const require = createRequire(import.meta.url);
 const app = express();
 app.set('trust proxy', true);
+app.set('etag', false);
 
 // --- Ensure directories exist ---
 for (const dir of [PUBLIC_DIR, SOURCES_DIR, DVR_DIR, RAW_CACHE_DIR, LOGS_DIR, IMAGE_CACHE_DIR]) {
@@ -34,9 +35,16 @@ app.use('/api', (_req, res, next) => {
   next();
 });
 app.use(express.static(PUBLIC_DIR, {
-  etag: true,
-  lastModified: true,
-  setHeaders: (res) => res.set('Cache-Control', 'no-cache'),
+  etag: false,
+  lastModified: false,
+  setHeaders: (res, filePath) => {
+    // JS bundles have content hash in filename — cache aggressively
+    if (filePath.endsWith('.js') || filePath.endsWith('.css')) {
+      res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    } else {
+      res.set('Cache-Control', 'no-cache');
+    }
+  },
 }));
 
 // --- Body parsing ---
@@ -520,10 +528,11 @@ const dvrShutdown = () => {
 // --- SPA fallback ---
 app.get('*', (req, res) => {
   const filePath = `${PUBLIC_DIR}${req.path}`;
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   if (fs.existsSync(filePath) && fs.lstatSync(filePath).isFile()) {
-    return res.sendFile(filePath);
+    return res.sendFile(filePath, { lastModified: false });
   }
-  res.sendFile(`${PUBLIC_DIR}/index.html`);
+  res.sendFile(`${PUBLIC_DIR}/index.html`, { lastModified: false });
 });
 
 // --- Error handler ---
