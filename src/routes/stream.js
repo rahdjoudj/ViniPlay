@@ -143,11 +143,9 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       return res.status(502).json({ error: `Cannot reach stream source: ${preflightErr.message}` });
     }
 
-    // Create stream directory and an initial empty playlist so HLS.js never gets 404
+    // Create stream directory — ffmpeg will write the playlist when ready
     if (!fs.existsSync(streamDir)) fs.mkdirSync(streamDir, { recursive: true });
     const playlistPath = path.join(streamDir, 'stream.m3u8');
-    // Minimal live playlist so HLS.js keeps polling until ffmpeg writes the real one
-    fs.writeFileSync(playlistPath, '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n');
 
     // Build ffmpeg HLS command
     // Build ffmpeg HLS command using the user's profile template
