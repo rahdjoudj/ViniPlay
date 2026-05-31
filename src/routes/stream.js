@@ -48,17 +48,26 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
 
   // Serve HLS playlist (.m3u8)
   router.get('/hls/:streamId/stream.m3u8', (req, res) => {
-    const playlistPath = path.resolve(HLS_DIR, req.params.streamId, 'stream.m3u8');
+    const streamId = req.params.streamId;
+    const playlistPath = path.resolve(HLS_DIR, streamId, 'stream.m3u8');
     if (!playlistPath.startsWith(HLS_DIR + path.sep)) return res.status(403).send('Forbidden');
-    if (!fs.existsSync(playlistPath)) {
-      return res.status(404).send('Stream not found or has ended.');
-    }
 
-    const streamKey = hlsStreamByDir.get(req.params.streamId);
+    const streamKey = hlsStreamByDir.get(streamId);
     const info = streamKey ? hlsStreams.get(streamKey) : null;
     if (info) info.lastAccess = Date.now();
 
-    // Debug: log playlist content on first few requests
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    if (!fs.existsSync(playlistPath)) {
+      // Playlist not written yet — return a stub so HLS.js keeps polling
+      // (404 would be fatal — HLS.js stops retrying)
+      res.send('#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n');
+      return;
+    }
+
+    // Log playlist content on first serve for debugging
     if (info && !info._playlistLogged) {
       try {
         const content = fs.readFileSync(playlistPath, 'utf-8');
@@ -67,9 +76,6 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       } catch {}
     }
 
-    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.sendFile(playlistPath, { cacheControl: false, lastModified: false, etag: false });
   });
 
