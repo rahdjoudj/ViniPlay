@@ -13,6 +13,7 @@ import { env, DATA_DIR, DVR_DIR, PUBLIC_DIR, SOURCES_DIR, RAW_CACHE_DIR, LOGS_DI
 import { applySecurityMiddleware } from './middleware/security.js';
 import { requireAuth, requireAdmin } from './middleware/auth.js';
 import { parseM3U } from './utils/m3u.js';
+import { processAndMergeSources, updateAndScheduleSourceRefreshes } from './services/source-processor.js';
 
 const require = createRequire(import.meta.url);
 const app = express();
@@ -482,8 +483,18 @@ for (const job of pendingJobs) dvrRoutes.engine.scheduleDvrJob(job);
 logger.info({ dvrJobs: pendingJobs.length }, 'DVR jobs loaded and scheduled');
 
 // --- Admin utility routes ---
-app.post('/api/process-sources', (_req, res) => {
-  res.json({ success: true, message: 'Source processing triggered on next refresh cycle.' });
+app.post('/api/process-sources', requireAuth, async (req, res) => {
+  try {
+    const result = await processAndMergeSources({ getSettings, sseClients, userId: req.session.userId });
+    if (result?.success) {
+      saveSettings(result.updatedSettings);
+      updateAndScheduleSourceRefreshes({ getSettings, saveSettings, sseClients });
+    }
+    res.json(result || { success: false, message: 'Processing completed with no result.' });
+  } catch (err) {
+    logger.error({ err }, 'Source processing failed');
+    res.status(500).json({ error: 'Source processing failed.' });
+  }
 });
 
 app.delete('/api/data', requireAdmin, (_req, res) => {
@@ -522,4 +533,4 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: env.NODE_ENV === 'development' ? err.message : 'Internal server error' });
 });
 
-export { app, db, activeStreamProcesses, hlsCleanup, dvrShutdown };
+export { app, db, activeStreamProcesses, hlsCleanup, dvrShutdown, getSettings, saveSettings, sseClients };

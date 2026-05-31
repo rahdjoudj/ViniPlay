@@ -23,30 +23,51 @@ export function createSourceRoutes({ db, getSettings, saveSettings }) {
 
   router.post('/fetch-groups', requireAuth, async (req, res) => {
     try {
-      const { sourceType, sourceId } = req.body;
+      const { sourceType, sourceId, url: bodyUrl, xc } = req.body;
       const settings = getSettings();
       const sources = settings[sourceType] || [];
+
+      // Resolve source: either from existing settings (by ID) or from request body (new source)
+      let fetchUrl;
       const source = sources.find(s => s.id === sourceId);
-      if (!source) return res.status(404).json({ error: 'Source not found.' });
 
-      let url;
-      if (source.url) {
-        url = source.url;
-      } else if (source.server_url && source.username && source.password) {
-        url = `${source.server_url.replace(/\/+$/, '')}/player_api.php?username=${encodeURIComponent(source.username)}&password=${encodeURIComponent(source.password)}&action=get_live_categories`;
+      if (source) {
+        // Existing source — use its stored config
+        if (source.url) {
+          fetchUrl = source.url;
+        } else if (source.path && source.type === 'url') {
+          fetchUrl = source.path;
+        } else if (source.xc_data) {
+          try {
+            const xd = typeof source.xc_data === 'string' ? JSON.parse(source.xc_data) : source.xc_data;
+            fetchUrl = `${xd.server.replace(/\/+$/, '')}/player_api.php?username=${encodeURIComponent(xd.username)}&password=${encodeURIComponent(xd.password)}&action=get_live_categories`;
+          } catch {}
+        }
+      } else if (bodyUrl) {
+        // New source — URL provided directly
+        fetchUrl = bodyUrl;
+      } else if (xc) {
+        // New source — XC credentials provided directly
+        try {
+          const xd = typeof xc === 'string' ? JSON.parse(xc) : xc;
+          fetchUrl = `${xd.server.replace(/\/+$/, '')}/player_api.php?username=${encodeURIComponent(xd.username)}&password=${encodeURIComponent(xd.password)}&action=get_live_categories`;
+        } catch (parseErr) {
+          return res.status(400).json({ error: 'Invalid XC data format.' });
+        }
       }
 
-      if (url) {
-        const axios = (await import('axios')).default;
-        const { data } = await axios.get(url, { timeout: 30000 });
-        const groups = Array.isArray(data) ? data.map(g => g.category_name || g) : [];
-        res.json({ groups: [...new Set(groups)].sort() });
-      } else {
-        res.json({ groups: [] });
+      if (!fetchUrl) {
+        return res.status(400).json({ error: 'No fetch URL could be determined. Provide a URL, XC credentials, or a valid source ID.' });
       }
+
+      logger.info({ fetchUrl: fetchUrl.replace(/[?&]password=[^&]+/, '?password=***').replace(/username=[^&]+/, 'username=***') }, '[sources] Fetching groups');
+      const axios = (await import('axios')).default;
+      const { data } = await axios.get(fetchUrl, { timeout: 30000 });
+      const groups = Array.isArray(data) ? data.map(g => g.category_name || g) : [];
+      res.json({ groups: [...new Set(groups)].sort() });
     } catch (err) {
-      logger.error({ err }, 'Failed to fetch groups');
-      res.status(500).json({ error: 'Failed to fetch groups.' });
+      logger.error({ err: err.message }, 'Failed to fetch groups');
+      res.status(500).json({ error: err.message || 'Failed to fetch groups.' });
     }
   });
 
