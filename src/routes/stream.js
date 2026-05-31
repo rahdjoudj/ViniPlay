@@ -220,12 +220,14 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     hlsStreamByDir.set(streamId, streamKey);
 
     // Watchdog: monitor playlist file for segment production
-    let lastPlaylistSize = fs.statSync(playlistPath).size;
+    let lastPlaylistSize = 0;
+    try { lastPlaylistSize = fs.statSync(playlistPath).size; } catch {}
     let segmentWatchCount = 0;
     const segmentWatchdog = setInterval(() => {
       segmentWatchCount++;
       try {
-        const stat = fs.statSync(playlistPath);
+        let stat;
+        try { stat = fs.statSync(playlistPath); } catch { return; } // playlist not written yet
         const segCount = fs.readdirSync(streamDir).filter(f => f.endsWith('.ts')).length;
         if (stat.size !== lastPlaylistSize || segCount > 0) {
           lastPlaylistSize = stat.size;
