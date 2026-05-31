@@ -166,12 +166,12 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     cmdTemplate = cmdTemplate.replace(/-f\s+\S+\s+\S+\s*$/, '').trim();
     const profileArgs = (cmdTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(a => a.replace(/^"|"$/g, ''));
 
+    const isCopyMode = cmdTemplate.includes('-c copy') || cmdTemplate.includes('-c:v copy');
     const ffmpegArgs = [
       '-v', 'level+warning',
       ...profileArgs,
-      // HEVC compatibility for Apple devices — harmless for H.264
-      '-tag:v', 'hvc1',
-      '-bsf:v', 'hevc_mp4toannexb',
+      // HEVC compatibility for Apple devices — only with copy mode
+      ...(isCopyMode ? ['-tag:v', 'hvc1', '-bsf:v', 'hevc_mp4toannexb'] : []),
       '-f', 'hls',
       '-hls_time', String(HLS_SEGMENT_TIME),
       '-hls_list_size', String(HLS_LIST_SIZE),
