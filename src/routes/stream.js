@@ -103,6 +103,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     if (existing) {
       existing.references++;
       existing.lastAccess = Date.now();
+      logger.debug({ streamKey, references: existing.references }, '[hls] Reusing existing stream');
       return res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
     }
 
@@ -133,14 +134,24 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       path.join(streamDir, 'stream.m3u8'),
     ];
 
-    logger.info({ streamKey, url: url.slice(0, 80), args: ffmpegArgs.join(' ') }, 'Starting HLS stream');
+    logger.info({ streamKey, url: url.slice(0, 80), profile: profile?.name || 'default', args: ffmpegArgs.join(' ') }, '[hls] Starting ffmpeg');
 
     const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    const startTime = Date.now();
+    let lastStderrLog = 0;
     ffmpeg.stderr.on('data', (data) => {
-      logger.info({ streamKey, msg: data.toString().trim().slice(0, 200) }, 'ffmpeg');
+      const msg = data.toString().trim();
+      if (!msg) return;
+      const now = Date.now();
+      // Rate-limit non-error stderr to once per 5s; always log errors immediately
+      const isError = /error|fail|invalid|unable|cannot|refused|timed?out/i.test(msg);
+      if (isError || now - lastStderrLog > 5000) {
+        lastStderrLog = now;
+        logger[isError ? 'warn' : 'info']({ streamKey, msg: msg.slice(0, 300) }, isError ? '[hls] ffmpeg stderr (warning)' : '[hls] ffmpeg');
+      }
     });
 
     const streamInfo = {
@@ -179,19 +190,22 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     activeStreamProcesses.set(streamKey, activeInfo);
     broadcastAdminActivity(sseClients);
 
-    ffmpeg.on('close', (code) => {
-      logger.info({ streamKey, code }, 'HLS stream ended');
+    ffmpeg.on('close', (code, signal) => {
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+      logger.info({ streamKey, code, signal, durationSec: duration }, '[hls] ffmpeg process exited');
       hlsStreams.delete(streamKey);
       hlsStreamByDir.delete(streamId);
       activeStreamProcesses.delete(streamKey);
       broadcastAdminActivity(sseClients);
-      // Clean up segments
       try { fs.rmSync(streamDir, { recursive: true, force: true }); } catch {}
     });
 
     ffmpeg.on('error', (err) => {
-      logger.error({ streamKey, err }, 'HLS stream error');
-      // close handler will fire next and clean up
+      logger.error({ streamKey, err: err.message }, '[hls] ffmpeg spawn error');
+    });
+
+    ffmpeg.on('spawn', () => {
+      logger.debug({ streamKey, pid: ffmpeg.pid }, '[hls] ffmpeg process spawned');
     });
 
     res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
@@ -201,6 +215,7 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       if (info) {
         info.references = Math.max(0, info.references - 1);
         info.lastAccess = Date.now();
+        logger.debug({ streamKey, references: info.references }, '[hls] Client disconnected (request close)');
       }
     });
   });
@@ -226,10 +241,13 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
   function killHls(info, key) {
     info.references = Math.max(0, info.references - 1);
     if (info.references <= 0) {
+      const ageSec = ((Date.now() - info.createdAt) / 1000).toFixed(1);
+      logger.info({ streamKey: key, ageSec, reason: info.stopped ? 'inactivity' : 'explicit stop' }, '[hls] Killing ffmpeg');
       info.stopped = true;
       info.ffmpeg.kill('SIGTERM');
       const timer = setTimeout(() => {
         if (info.ffmpeg.exitCode === null) {
+          logger.warn({ streamKey: key }, '[hls] SIGTERM timed out — sending SIGKILL');
           try { info.ffmpeg.kill('SIGKILL'); } catch {}
         }
       }, 5000);
@@ -240,11 +258,16 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
   // Singleton cleanup interval — runs once at module level, not per request
   setInterval(() => {
     const now = Date.now();
+    let inactiveCount = 0;
     for (const [key, info] of hlsStreams) {
       if (info.references <= 0 && (now - info.lastAccess > HLS_INACTIVITY_TIMEOUT)) {
-        logger.info({ streamKey: key }, 'Cleaning up inactive HLS stream');
+        inactiveCount++;
+        logger.info({ streamKey: key, idleSec: ((now - info.lastAccess) / 1000).toFixed(0) }, '[hls] Cleaning up inactive stream');
         killHls(info, key);
       }
+    }
+    if (inactiveCount > 0) {
+      logger.info({ inactiveCount, totalTracked: hlsStreams.size }, '[hls] Cleanup tick complete');
     }
   }, HLS_CLEANUP_INTERVAL).unref();
 

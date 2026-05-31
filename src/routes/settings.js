@@ -2,7 +2,11 @@ import { Router } from 'express';
 import { logger } from '../config/logger.js';
 import { requireAuth } from '../middleware/auth.js';
 
-// Deep-merge `patch` into `base` — arrays at same key replace entirely
+// Guarded arrays — if existing is non-empty and incoming is empty, refuse the wipe
+const GUARDED_ARRAYS = ['streamProfiles', 'userAgents'];
+
+// Deep-merge `patch` into `base` — arrays at same key replace entirely,
+// but guarded arrays refuse to go from non-empty → empty
 function deepMerge(base, patch) {
   const result = { ...base };
   for (const key of Object.keys(patch)) {
@@ -10,6 +14,14 @@ function deepMerge(base, patch) {
     const bv = result[key];
     if (pv && typeof pv === 'object' && !Array.isArray(pv) && bv && typeof bv === 'object' && !Array.isArray(bv)) {
       result[key] = deepMerge(bv, pv);
+    } else if (Array.isArray(pv) && GUARDED_ARRAYS.includes(key)) {
+      const existingLen = Array.isArray(bv) ? bv.length : 0;
+      if (existingLen > 0 && pv.length === 0) {
+        logger.warn({ key, existingLen }, '[settings-save] Refusing to wipe non-empty guarded array — keeping existing');
+        // keep existing
+      } else {
+        result[key] = pv;
+      }
     } else {
       result[key] = pv;
     }
