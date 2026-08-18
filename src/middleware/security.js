@@ -33,7 +33,7 @@ export function applySecurityMiddleware(app) {
 
   const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 20,
+    limit: 20,
     message: { error: 'Too many login attempts. Please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -45,7 +45,7 @@ export function applySecurityMiddleware(app) {
 
   const apiLimiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 200,
+    limit: 200,
     skip: (req) => req.path === '/image-proxy',
     message: { error: 'Too many requests. Please slow down.' },
     standardHeaders: true,
@@ -57,7 +57,7 @@ export function applySecurityMiddleware(app) {
 
   const imageProxyLimiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 600,
+    limit: 600,
     message: { error: 'Too many image requests. Please slow down.' },
     standardHeaders: true,
     legacyHeaders: false,
