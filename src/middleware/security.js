@@ -36,7 +36,7 @@ export function applySecurityMiddleware(app) {
     limit: 20,
     message: { error: 'Too many login attempts. Please try again later.' },
     standardHeaders: true,
-    legacyHeaders: false,
+    headers: false,
     validate: { trustProxy: false },
   });
 
@@ -49,7 +49,7 @@ export function applySecurityMiddleware(app) {
     skip: (req) => req.path === '/image-proxy',
     message: { error: 'Too many requests. Please slow down.' },
     standardHeaders: true,
-    legacyHeaders: false,
+    headers: false,
     validate: { trustProxy: false },
   });
 
@@ -60,7 +60,7 @@ export function applySecurityMiddleware(app) {
     limit: 600,
     message: { error: 'Too many image requests. Please slow down.' },
     standardHeaders: true,
-    legacyHeaders: false,
+    headers: false,
     validate: { trustProxy: false },
   });
 

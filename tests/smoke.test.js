@@ -24,7 +24,7 @@ describe('App startup smoke test', () => {
     const mod = await import('../src/app.js');
     expect(mod.app).toBeDefined();
     expect(typeof mod.app.listen).toBe('function');
-    const routes = mod.app._router?.stack?.length || 0;
+    const routes = mod.app.router?.stack?.length || 0;
     expect(routes).toBeGreaterThan(5);
   });
 

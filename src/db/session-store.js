@@ -1,5 +1,6 @@
 import session from 'express-session';
 import { getDb } from './index.js';
+import { logger } from '../config/logger.js';
 
 // Custom better-sqlite3-backed session store. Extends session.Store so
 // createSession (which assigns req.session) is inherited — overriding it
@@ -22,13 +23,31 @@ export class SessionStore extends session.Store {
     this._touch = db.prepare('UPDATE sessions SET expires = ? WHERE sid = ? AND expires > ?');
     this._prune = db.prepare('DELETE FROM sessions WHERE expires < ?');
 
-    this._pruneTimer = setInterval(() => this._prune.run(Date.now()), 60_000);
+    this._pruneTimer = setInterval(() => {
+      try {
+        this._prune.run(Date.now());
+      } catch (err) {
+        // Can fire after closeDb() in shutdown/embedding scenarios — don't crash.
+        logger.warn({ err }, 'Session prune failed');
+      }
+    }, 60_000);
+    this._pruneTimer.unref();
   }
 
   get(sid, cb) {
     try {
       const row = this._get.get(sid, Date.now());
-      process.nextTick(() => cb(null, row ? JSON.parse(row.data) : null));
+      if (!row) return process.nextTick(() => cb(null, null));
+      try {
+        const data = JSON.parse(row.data);
+        process.nextTick(() => cb(null, data));
+      } catch (err) {
+        // Corrupt row: treat as no session so a fresh one is generated
+        // instead of 500ing every request for this sid.
+        logger.warn({ sid }, 'Corrupt session data discarded');
+        this._del.run(sid);
+        process.nextTick(() => cb(null, null));
+      }
     } catch (err) { process.nextTick(() => cb(err)); }
   }
 

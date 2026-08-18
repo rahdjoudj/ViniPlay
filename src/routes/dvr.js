@@ -280,8 +280,9 @@ export function createDvrRoutes({ db, getSettings, activeDvrJobs, parseM3U }) {
     try {
       fs.statfs(DVR_DIR, (err, statfs) => {
         if (err) return res.status(500).json({ error: 'Could not get storage information.' });
-        const total = statfs.blocks * statfs.bsize;
-        const free = statfs.bfree * statfs.bsize;
+        const blockSize = statfs.frsize || statfs.bsize;
+        const total = statfs.blocks * blockSize;
+        const free = statfs.bfree * blockSize;
         const used = total - free;
         res.json({ total, used, percentage: Math.round((used / total) * 100) });
       });

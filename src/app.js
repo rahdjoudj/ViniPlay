@@ -542,7 +542,7 @@ app.get('/{*splat}', (req, res) => {
 app.use((err, _req, res, _next) => {
   logger.error({ err }, 'Unhandled error');
   if (res.headersSent) return;
-  const status = Number.isInteger(err?.status) ? err.status : 500;
+  const status = err?.status >= 400 && err?.status < 600 ? err.status : 500;
   res.status(status).json({ error: env.NODE_ENV === 'development' ? err.message : 'Internal server error' });
 });
 
