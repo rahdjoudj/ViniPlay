@@ -384,8 +384,12 @@ app.use((req, res, next) => {
 });
 
 // --- DVR static files (ownership-checked) ---
-app.get('/dvr/*', requireAuth, (req, res) => {
-  const filePath = path.resolve(DVR_DIR, req.params[0]);
+// Express 5 wildcard params capture as an array of segments — join them first.
+app.get('/dvr/*splat', requireAuth, (req, res) => {
+  const relativePath = Array.isArray(req.params.splat)
+    ? req.params.splat.join('/')
+    : req.params.splat;
+  const filePath = path.resolve(DVR_DIR, relativePath);
   if (!filePath.startsWith(DVR_DIR + path.sep) && filePath !== DVR_DIR) {
     return res.status(403).send('Forbidden');
   }
@@ -525,7 +529,7 @@ const dvrShutdown = () => {
 };
 
 // --- SPA fallback ---
-app.get('*', (req, res) => {
+app.get('/{*splat}', (req, res) => {
   const filePath = `${PUBLIC_DIR}${req.path}`;
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   if (fs.existsSync(filePath) && fs.lstatSync(filePath).isFile()) {
@@ -538,7 +542,8 @@ app.get('*', (req, res) => {
 app.use((err, _req, res, _next) => {
   logger.error({ err }, 'Unhandled error');
   if (res.headersSent) return;
-  res.status(500).json({ error: env.NODE_ENV === 'development' ? err.message : 'Internal server error' });
+  const status = Number.isInteger(err?.status) ? err.status : 500;
+  res.status(status).json({ error: env.NODE_ENV === 'development' ? err.message : 'Internal server error' });
 });
 
 export { app, db, activeStreamProcesses, hlsCleanup, dvrShutdown, getSettings, saveSettings, sseClients };
