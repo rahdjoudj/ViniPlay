@@ -1,7 +1,10 @@
-import { EventEmitter } from 'events';
+import session from 'express-session';
 import { getDb } from './index.js';
 
-export class SessionStore extends EventEmitter {
+// Custom better-sqlite3-backed session store. Extends session.Store so
+// createSession (which assigns req.session) is inherited — overriding it
+// without setting req.session breaks every request's session handling.
+export class SessionStore extends session.Store {
   constructor() {
     super();
 
@@ -39,10 +42,6 @@ export class SessionStore extends EventEmitter {
 
   destroy(sid, cb) {
     try { this._del.run(sid); process.nextTick(() => cb(null)); } catch (err) { process.nextTick(() => cb(err)); }
-  }
-
-  createSession(_req, sess, cb) {
-    if (typeof cb === 'function') { process.nextTick(() => cb(null, sess)); }
   }
 
   touch(sid, session, cb) {

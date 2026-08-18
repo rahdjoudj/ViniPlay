@@ -3,7 +3,6 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import schedule from 'node-schedule';
-import disk from 'diskusage';
 import { logger } from '../config/logger.js';
 import { DVR_DIR, LIVE_CHANNELS_M3U_PATH } from '../config/index.js';
 import { requireAuth, requireDvrAccess } from '../middleware/auth.js';
@@ -279,10 +278,12 @@ export function createDvrRoutes({ db, getSettings, activeDvrJobs, parseM3U }) {
   router.get('/dvr/storage', requireAuth, (req, res) => {
     if (!req.session.canUseDvr && !req.session.isAdmin) return res.json({ total: 0, used: 0, percentage: 0 });
     try {
-      disk.check(DVR_DIR, (err, info) => {
+      fs.statfs(DVR_DIR, (err, statfs) => {
         if (err) return res.status(500).json({ error: 'Could not get storage information.' });
-        const used = info.total - info.free;
-        res.json({ total: info.total, used, percentage: Math.round((used / info.total) * 100) });
+        const total = statfs.blocks * statfs.bsize;
+        const free = statfs.bfree * statfs.bsize;
+        const used = total - free;
+        res.json({ total, used, percentage: Math.round((used / total) * 100) });
       });
     } catch (e) {
       res.status(500).json({ error: 'Server error checking storage.' });

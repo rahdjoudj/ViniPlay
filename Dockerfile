@@ -3,7 +3,7 @@ FROM ubuntu:26.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Node.js 24 LTS and build essentials
+# Install Node.js 26 and build essentials
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -11,7 +11,7 @@ RUN apt-get update && \
     curl \
     gnupg \
     python3-setuptools && \
-    curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_26.x | bash - && \
     apt-get install -y nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -43,7 +43,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LD_LIBRARY_PATH=/usr/lib/jellyfin-ffmpeg/lib
 ENV NODE_ENV=production
 
-# Install runtime: Node.js 24, Jellyfin FFmpeg, VA drivers
+# Install runtime: Node.js 26, Jellyfin FFmpeg, VA drivers
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
@@ -52,7 +52,7 @@ RUN apt-get update && \
     mesa-va-drivers && \
     curl -s https://repo.jellyfin.org/ubuntu/jellyfin_team.gpg.key | gpg --dearmor | tee /usr/share/keyrings/jellyfin.gpg >/dev/null && \
     echo "deb [arch=${TARGETARCH} signed-by=/usr/share/keyrings/jellyfin.gpg] https://repo.jellyfin.org/ubuntu resolute main" > /etc/apt/sources.list.d/jellyfin.list && \
-    curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_26.x | bash - && \
     apt-get install -y --no-install-recommends \
     jellyfin-ffmpeg7 \
     nodejs && \

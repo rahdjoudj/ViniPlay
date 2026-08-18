@@ -8,6 +8,7 @@ import { execSync } from 'child_process';
 import { createRequire } from 'module';
 import webpush from 'web-push';
 import { getDb } from './db/index.js';
+import { SessionStore } from './db/session-store.js';
 import { logger } from './config/logger.js';
 import { env, DATA_DIR, DVR_DIR, PUBLIC_DIR, SOURCES_DIR, RAW_CACHE_DIR, LOGS_DIR, IMAGE_CACHE_DIR, VAPID_KEYS_PATH, SETTINGS_PATH } from './config/index.js';
 import { applySecurityMiddleware } from './middleware/security.js';
@@ -343,11 +344,9 @@ if (!sessionSecret) {
   }
 }
 
-const SQLiteStore = require('connect-sqlite3')(session);
-
 app.use(
   session({
-    store: new SQLiteStore({ db: 'sessions.db', dir: DATA_DIR, table: 'http_sessions' }),
+    store: new SessionStore(),
     secret: sessionSecret,
     resave: false,
     saveUninitialized: false,

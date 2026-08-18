@@ -14,12 +14,13 @@
   },
   "author": "Andrea Ardovini",
   "license": "CC BY-NC-SA 4.0",
+  "engines": {
+    "node": ">=26"
+  },
   "dependencies": {
     "axios": "^1.7.2",
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^11.7.0",
-    "connect-sqlite3": "^0.9.16",
-    "diskusage": "^1.2.0",
+    "better-sqlite3": "^13.0.3",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
