@@ -53,25 +53,57 @@ async function resolveStreamUrl(url) {
 /**
  * Creates the best available player for a given URL.
  */
-export async function createPlayer({ url, video, isLive = true, onError, onRecovered, onStats }) {
+export async function createPlayer({ url, video, isLive = true, onError, onRecovered, onStats, onStalled }) {
   // Try HLS negotiation for server-transcoded streams
   const resolvedUrl = await resolveStreamUrl(url);
   const streamType = detectStreamType(resolvedUrl);
 
   if ((streamType.type === 'hls' || streamType.type === 'vod') && typeof Hls !== 'undefined' && Hls.isSupported()) {
-    return createHlsPlayer({ url: resolvedUrl, video, isLive, streamType, onError, onRecovered, onStats });
+    return createHlsPlayer({ url: resolvedUrl, video, isLive, streamType, onError, onRecovered, onStats, onStalled });
   }
 
   if (typeof mpegts !== 'undefined' && mpegts.isSupported()) {
-    return createMpegtsPlayer({ url, video, isLive, streamType, onError, onRecovered, onStats });
+    return createMpegtsPlayer({ url, video, isLive, streamType, onError, onRecovered, onStats, onStalled });
   }
 
   return createNativePlayer({ url, video, isLive, onError });
 }
 
+/**
+ * Stall detector shared by the HLS and mpegts engines. Silent freezes (buffer
+ * drained, no error event) never surface through the error handlers, so count
+ * consecutive stats ticks where the video element has almost nothing buffered
+ * while it is expected to be advancing.
+ */
+function createStallDetector(video, onStalled) {
+  const STALL_BUFFER_SECONDS = 0.5;
+  const STALL_TICKS_THRESHOLD = 3; // ~6s at the 2s stats cadence
+  let stallTicks = 0;
+  let lastCurrentTime = 0;
+
+  return function tick(bufferSeconds) {
+    if (video.paused || video.ended || video.readyState < 2) {
+      stallTicks = 0;
+      return;
+    }
+    // Advancing playback is never a stall, even with a thin buffer
+    if (video.currentTime - lastCurrentTime > 0.25) {
+      lastCurrentTime = video.currentTime;
+      stallTicks = 0;
+      return;
+    }
+    lastCurrentTime = video.currentTime;
+    stallTicks = bufferSeconds < STALL_BUFFER_SECONDS ? stallTicks + 1 : 0;
+    if (stallTicks >= STALL_TICKS_THRESHOLD) {
+      stallTicks = 0;
+      onStalled?.();
+    }
+  };
+}
+
 // --- HLS.js player (primary) ---
 
-function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered, onStats }) {
+function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered, onStats, onStalled }) {
   const hls = new Hls({
     liveSyncDurationCount: 3,
     liveMaxLatencyDurationCount: 6,
@@ -80,6 +112,7 @@ function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered,
     backBufferLength: isLive ? 30 : 90,
   });
 
+  const stallTick = onStalled ? createStallDetector(video, onStalled) : null;
   let statsInterval = null;
   let recoverAttempts = 0;
   const MAX_RECOVERY = 5;
@@ -141,9 +174,10 @@ function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered,
     }
   });
 
-  if (onStats) {
+  if (onStats || stallTick) {
     statsInterval = setInterval(() => {
       const buf = video.buffered.length > 0 ? video.buffered.end(0) - video.currentTime : 0;
+      stallTick?.(buf);
 
       let fps = 'N/A';
       let dropped = 'N/A';
@@ -168,15 +202,17 @@ function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered,
           : `${(measuredBandwidth / 1024).toFixed(0)} kbps`;
       }
 
-      onStats({
-        resolution: (video.videoWidth && video.videoHeight) ? `${video.videoWidth}x${video.videoHeight}` : 'N/A',
-        buffer: buf.toFixed(2),
-        fps,
-        dropped,
-        bandwidth,
-        videoCodec: currentVideoCodec,
-        audioCodec: currentAudioCodec,
-      });
+      if (onStats) {
+        onStats({
+          resolution: (video.videoWidth && video.videoHeight) ? `${video.videoWidth}x${video.videoHeight}` : 'N/A',
+          buffer: buf.toFixed(2),
+          fps,
+          dropped,
+          bandwidth,
+          videoCodec: currentVideoCodec,
+          audioCodec: currentAudioCodec,
+        });
+      }
     }, 2000);
   }
 
@@ -196,7 +232,7 @@ function createHlsPlayer({ url, video, isLive, streamType, onError, onRecovered,
 
 // --- mpegts.js player (fallback for raw TS) ---
 
-function createMpegtsPlayer({ url, video, isLive, streamType, onError, onRecovered, onStats }) {
+function createMpegtsPlayer({ url, video, isLive, streamType, onError, onRecovered, onStats, onStalled }) {
   const player = mpegts.createPlayer(
     { type: 'mse', isLive, url },
     {
@@ -211,6 +247,7 @@ function createMpegtsPlayer({ url, video, isLive, streamType, onError, onRecover
     }
   );
 
+  const stallTick = onStalled ? createStallDetector(video, onStalled) : null;
   let statsInterval = null;
   let recoverAttempts = 0;
   const MAX_RECOVERY = 3;
@@ -240,20 +277,23 @@ function createMpegtsPlayer({ url, video, isLive, streamType, onError, onRecover
 
   player.play().catch(() => {});
 
-  if (onStats) {
+  if (onStats || stallTick) {
     const mediaInfo = player.mediaInfo || {};
     statsInterval = setInterval(() => {
       const stats = player.statisticsInfo || {};
       const buf = video.buffered.length > 0 ? video.buffered.end(0) - video.currentTime : 0;
-      onStats({
-        resolution: (video.videoWidth && video.videoHeight) ? `${video.videoWidth}x${video.videoHeight}` : 'N/A',
-        buffer: buf.toFixed(2),
-        fps: mediaInfo.fps || 'N/A',
-        dropped: stats.droppedFrames ?? 'N/A',
-        bandwidth: stats.speed ? `${(stats.speed / 1024).toFixed(1)} MB/s` : 'N/A',
-        videoCodec: getCodecName(mediaInfo.videoCodec),
-        audioCodec: getCodecName(mediaInfo.audioCodec),
-      });
+      stallTick?.(buf);
+      if (onStats) {
+        onStats({
+          resolution: (video.videoWidth && video.videoHeight) ? `${video.videoWidth}x${video.videoHeight}` : 'N/A',
+          buffer: buf.toFixed(2),
+          fps: mediaInfo.fps || 'N/A',
+          dropped: stats.droppedFrames ?? 'N/A',
+          bandwidth: stats.speed ? `${(stats.speed / 1024).toFixed(1)} MB/s` : 'N/A',
+          videoCodec: getCodecName(mediaInfo.videoCodec),
+          audioCodec: getCodecName(mediaInfo.audioCodec),
+        });
+      }
     }, 2000);
   }
 

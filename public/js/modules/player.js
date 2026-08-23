@@ -21,7 +21,9 @@ let retryCount = 0;
 let retryTimeout = null;
 let removeKeyboardShortcuts = null;
 let _streamLoading = false;
+let stallRetryCount = 0;
 const MAX_RETRIES = 3;
+const MAX_STALL_RETRIES = 3;
 
 function showLoading(channelName) {
   _streamLoading = true;
@@ -54,6 +56,21 @@ function handleStreamError() {
   }, 2000);
 }
 
+// Stall watchdog callback: the buffer drained without any error event (silent
+// freeze). Reuse the manual refresh path; the server respawns a stalled
+// pipeline. Budget resets in updateStreamInfo once playback genuinely resumes.
+function handleStall() {
+  if (_streamLoading) return; // an error retry is already reloading
+  if (stallRetryCount >= MAX_STALL_RETRIES) {
+    showNotification('Stream stalled repeatedly. Please try another channel.', true, 5000);
+    stopAndCleanupPlayer();
+    return;
+  }
+  stallRetryCount++;
+  showNotification(`Stream stalled — reloading (${stallRetryCount}/${MAX_STALL_RETRIES})`, true, 2000);
+  forceRefreshStream();
+}
+
 export async function forceRefreshStream() {
   if (!currentChannelInfo) {
     showNotification('No active stream to refresh.', true);
@@ -75,6 +92,7 @@ export const stopAndCleanupPlayer = async () => {
   }
   if (retryTimeout) { clearTimeout(retryTimeout); retryTimeout = null; }
   retryCount = 0;
+  stallRetryCount = 0;
   currentChannelInfo = null;
 
   if (currentLocalStreamUrl && !castState.isCasting) {
@@ -101,6 +119,8 @@ export const stopAndCleanupPlayer = async () => {
 };
 
 function updateStreamInfo({ resolution, buffer, fps, dropped, bandwidth, videoCodec, audioCodec } = {}) {
+  // Playback genuinely resumed — reset the stall retry budget
+  if (parseFloat(String(buffer)) >= 0.5) stallRetryCount = 0;
   if (UIElements.streamInfoResolution) UIElements.streamInfoResolution.textContent = `Resolution: ${resolution || 'N/A'}`;
   if (UIElements.streamInfoBandwidth) UIElements.streamInfoBandwidth.textContent = `Bandwidth: ${bandwidth || 'N/A'}`;
   if (UIElements.streamInfoFps) UIElements.streamInfoFps.textContent = `FPS: ${fps || 'N/A'}`;
@@ -118,6 +138,7 @@ export const playChannel = async (url, name, channelId) => {
     await stopAndCleanupPlayer();
   }
   if (!retryTimeout) retryCount = 0;
+  stallRetryCount = 0;
   currentChannelInfo = { url, name, channelId };
 
   // Show loading state immediately — ffmpeg may take several seconds
@@ -174,7 +195,10 @@ export const playChannel = async (url, name, channelId) => {
       video: UIElements.videoElement,
       isLive: true,
       onError: (type, detail, fatal) => {
-        if (fatal && (type === 'NetworkError' || type === 'MediaError')) {
+        // hls.js reports lowercase error types ('networkError'), mpegts.js
+        // capitalized ('NetworkError') — normalize before comparing.
+        const normalizedType = String(type || '').toLowerCase();
+        if (fatal && (normalizedType === 'networkerror' || normalizedType === 'mediaerror')) {
           if (appState.player) handleStreamError();
         } else if (fatal) {
           showNotification(`Player Error: ${detail}`, true);
@@ -185,6 +209,7 @@ export const playChannel = async (url, name, channelId) => {
         retryCount = 0;
         if (retryTimeout) { clearTimeout(retryTimeout); retryTimeout = null; }
       },
+      onStalled: () => handleStall(),
       onStats: (stats) => updateStreamInfo(stats),
     });
   } catch (err) {
