@@ -6,14 +6,20 @@ import path from 'path';
 import http from 'http';
 import https from 'https';
 import { logger } from '../config/logger.js';
-import { DATA_DIR, LIVE_CHANNELS_M3U_PATH } from '../config/index.js';
+import { DATA_DIR, LIVE_CHANNELS_M3U_PATH, env } from '../config/index.js';
 import { broadcastAdminUpdate } from './_sse-utils.js';
+import { injectInputFlags, shouldRespawn, shouldKill, isProgressing, extractNewestSegment } from '../utils/hls-resilience.js';
 
 const HLS_DIR = path.join(DATA_DIR, 'hls');
 const HLS_SEGMENT_TIME = 2;
 const HLS_LIST_SIZE = 5;
 const HLS_INACTIVITY_TIMEOUT = 30_000;
 const HLS_CLEANUP_INTERVAL = 30_000;
+// Stall recovery: kill ffmpeg after ~10s of no playlist progress, treat a
+// playlist older than 15s as stalled, and retry respawns at most every 10s.
+const STALL_KILL_TICKS = 5;
+const STALE_PLAYLIST_MS = 15_000;
+const RESPAWN_COOLDOWN_MS = 10_000;
 
 // Track active HLS streams: streamKey -> { ffmpeg, url, userId, createdAt, references }
 const hlsStreams = new Map();
@@ -46,6 +52,213 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
   // Ensure HLS directory exists
   if (!fs.existsSync(HLS_DIR)) fs.mkdirSync(HLS_DIR, { recursive: true });
 
+  /**
+   * Spawns ffmpeg for a HLS stream and registers it in hlsStreams. Also used
+   * for respawns: it replaces the (tombstoned) entry for the same streamKey
+   * and starts with a clean playlist so segment numbers stay monotonic
+   * (hls_start_number_source epoch). Returns the streamInfo entry.
+   */
+  async function startHlsProcess({ streamKey, streamId, streamDir, playlistPath, url, userId, username, profile, userAgentValue, references, lastRespawnAttemptAt = 0 }) {
+    // Clear any previous generation's playlist/segments so a respawned
+    // ffmpeg never mixes old and new segment numbers in one playlist.
+    if (!fs.existsSync(streamDir)) fs.mkdirSync(streamDir, { recursive: true });
+    try {
+      for (const f of fs.readdirSync(streamDir)) {
+        if (f.endsWith('.ts') || f.endsWith('.m3u8')) fs.rmSync(path.join(streamDir, f), { force: true });
+      }
+    } catch {}
+
+    // Build ffmpeg HLS command using the user's profile template
+    let cmdTemplate = (profile?.command || '-i {streamUrl} -c copy')
+      .replace(/{streamUrl}/g, url)
+      .replace(/{userAgent}|{clientUserAgent}/g, userAgentValue);
+    // Strip old output directives (pipe, file) — we replace with HLS
+    cmdTemplate = cmdTemplate.replace(/-f\s+\S+\s+pipe:\d?\s*$/, '').trim();
+    cmdTemplate = cmdTemplate.replace(/-f\s+\S+\s+\S+\s*$/, '').trim();
+    let profileArgs = (cmdTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(a => a.replace(/^"|"$/g, ''));
+    // HTTP input resilience: read timeout + reconnects so a stalled provider
+    // socket kills ffmpeg instead of hanging it forever.
+    profileArgs = injectInputFlags(profileArgs, env.FFMPEG_INPUT_TIMEOUT_MS);
+
+    const isCopyMode = cmdTemplate.includes('-c copy') || cmdTemplate.includes('-c:v copy');
+    const ffmpegArgs = [
+      '-v', 'level+warning',
+      ...profileArgs,
+      // HEVC compatibility for Apple devices — only with copy mode
+      ...(isCopyMode ? ['-tag:v', 'hvc1', '-bsf:v', 'hevc_mp4toannexb'] : []),
+      '-f', 'hls',
+      '-hls_time', String(HLS_SEGMENT_TIME),
+      '-hls_list_size', String(HLS_LIST_SIZE),
+      '-hls_flags', 'delete_segments+append_list',
+      '-hls_start_number_source', 'epoch',
+      '-hls_segment_filename', path.join(streamDir, 'segment_%05d.ts'),
+      path.join(streamDir, 'stream.m3u8'),
+    ];
+
+    logger.info({ streamKey, url: url.slice(0, 80), profile: profile?.name || 'default', args: ffmpegArgs.join(' ') }, '[hls] Starting ffmpeg');
+
+    const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const startTime = Date.now();
+    let stderrLineCount = 0;
+    let noOutputTimer;
+
+    const streamInfo = {
+      ffmpeg,
+      url,
+      userId,
+      username,
+      profile,
+      userAgent: userAgentValue,
+      streamKey,
+      streamId,
+      createdAt: Date.now(),
+      lastAccess: Date.now(),
+      references,
+      streamDir,
+      dead: false,
+      respawning: false,
+      lastRespawnAttemptAt,
+    };
+
+    hlsStreams.set(streamKey, streamInfo);
+    hlsStreamByDir.set(streamId, streamKey);
+
+    ffmpeg.on('spawn', () => {
+      logger.info({ streamKey, pid: ffmpeg.pid }, '[hls] ffmpeg process spawned');
+      // If no stderr within 3s, log a diagnostic
+      noOutputTimer = setTimeout(() => {
+        if (stderrLineCount === 0) {
+          logger.warn({ streamKey, pid: ffmpeg.pid, elapsedMs: Date.now() - startTime }, '[hls] No stderr from ffmpeg after 3s — process may be hung or binary missing');
+        }
+      }, 3000);
+      noOutputTimer.unref();
+    });
+
+    ffmpeg.stderr.on('data', (data) => {
+      const msg = data.toString().trim();
+      if (!msg) return;
+      stderrLineCount++;
+      const isError = /error|fail|invalid|unable|cannot|refused|timed?out|denied|not found|no such/i.test(msg);
+      logger[isError ? 'warn' : 'info']({ streamKey, line: stderrLineCount, msg: msg.slice(0, 400) }, isError ? '[hls] ffmpeg stderr (warning)' : '[hls] ffmpeg');
+    });
+
+    // Also capture stdout — ffmpeg occasionally writes progress there
+    ffmpeg.stdout.on('data', (data) => {
+      const msg = data.toString().trim();
+      if (msg) logger.debug({ streamKey, msg: msg.slice(0, 200) }, '[hls] ffmpeg stdout');
+    });
+
+    // Watchdog: monitor playlist file for segment production. Progress = new
+    // bytes OR a new segment name; a stalled-but-alive ffmpeg produces neither.
+    // -1 matches the "playlist missing" read below, so a not-yet-written
+    // playlist is never mistaken for progress. hasProgressed gives slow
+    // sources a grace period: the watchdog only counts silence AFTER the
+    // pipeline has produced output at least once (dead-at-start HTTP feeds
+    // are caught by -rw_timeout instead).
+    let lastPlaylistSize = -1;
+    let lastSegmentName = null;
+    let ticksWithoutProgress = 0;
+    let hasProgressed = false;
+    try { lastPlaylistSize = fs.statSync(playlistPath).size; } catch {}
+    const segmentWatchdog = setInterval(() => {
+      if (streamInfo.dead || streamInfo.stopped) return;
+      let playlistSize = -1;
+      let newestSegment = null;
+      try { playlistSize = fs.statSync(playlistPath).size; } catch {}
+      try { newestSegment = extractNewestSegment(fs.readFileSync(playlistPath, 'utf-8')); } catch {}
+      if (isProgressing({
+        playlistSizeChanged: playlistSize !== lastPlaylistSize,
+        newestSegmentChanged: newestSegment !== null && newestSegment !== lastSegmentName,
+      })) {
+        lastPlaylistSize = playlistSize;
+        if (newestSegment !== null) lastSegmentName = newestSegment;
+        ticksWithoutProgress = 0;
+        hasProgressed = true;
+        logger.info({ streamKey, playlistBytes: playlistSize, newestSegment, elapsedS: ((Date.now() - startTime) / 1000).toFixed(0) }, '[hls] Playlist updated — segments being produced');
+      } else {
+        if (!hasProgressed) return;
+        ticksWithoutProgress++;
+        if (shouldKill({ ticksWithoutProgress, killAfterTicks: STALL_KILL_TICKS })) {
+          logger.warn({ streamKey, pid: ffmpeg.pid, elapsedS: ((Date.now() - startTime) / 1000).toFixed(0), stderrLines: stderrLineCount }, '[hls] No segments produced after ~10s — killing ffmpeg (auto-respawn on next poll)');
+          streamInfo.dead = true;
+          try { ffmpeg.kill('SIGKILL'); } catch {}
+        }
+      }
+    }, 2000);
+    segmentWatchdog.unref();
+
+    const activeInfo = {
+      process: ffmpeg,
+      references,
+      lastAccess: Date.now(),
+      userId,
+      username,
+      channelId: null,
+      channelName: `HLS: ${url.slice(0, 60)}`,
+      channelLogo: null,
+      streamProfileName: profile?.name || 'HLS (Built-in)',
+      startTime: new Date().toISOString(),
+      historyId: null,
+      clientIp: null,
+      streamKey,
+      isTranscoded: true,
+    };
+    activeStreamProcesses.set(streamKey, activeInfo);
+    broadcastAdminActivity(sseClients);
+
+    ffmpeg.on('close', (code, signal) => {
+      if (noOutputTimer) clearTimeout(noOutputTimer);
+      clearInterval(segmentWatchdog);
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+      logger[code === 0 ? 'info' : 'warn']({
+        streamKey, code, signal, durationSec: duration,
+        stderrLines: stderrLineCount,
+        hadOutput: stderrLineCount > 0,
+      }, code === 0 ? '[hls] ffmpeg exited cleanly' : '[hls] ffmpeg exited with error');
+
+      const info = hlsStreams.get(streamKey);
+      // A previous generation's process closing after a respawn must not
+      // touch the entry now owned by the new ffmpeg.
+      if (!info || info.ffmpeg !== ffmpeg) return;
+
+      if (info.stopped) {
+        // Explicit stop or inactivity sweep — full cleanup
+        hlsStreams.delete(streamKey);
+        hlsStreamByDir.delete(streamId);
+        activeStreamProcesses.delete(streamKey);
+        broadcastAdminActivity(sseClients);
+        try { fs.rmSync(streamDir, { recursive: true, force: true }); } catch {}
+        return;
+      }
+
+      // Unexpected exit or watchdog kill — tombstone: keep the entry and dir
+      // so the next playlist poll can trigger a respawn.
+      info.ffmpeg = null;
+      info.dead = true;
+      info.respawning = false;
+      activeStreamProcesses.delete(streamKey);
+      broadcastAdminActivity(sseClients);
+    });
+
+    ffmpeg.on('error', (err) => {
+      if (noOutputTimer) clearTimeout(noOutputTimer);
+      clearInterval(segmentWatchdog);
+      logger.error({ streamKey, err: err.message, code: err.code, pid: ffmpeg.pid }, '[hls] ffmpeg spawn error (binary missing or not executable?)');
+      const info = hlsStreams.get(streamKey);
+      if (!info || info.ffmpeg !== ffmpeg) return;
+      info.ffmpeg = null;
+      info.dead = true;
+      info.respawning = false;
+      activeStreamProcesses.delete(streamKey);
+      broadcastAdminActivity(sseClients);
+    });
+
+    return streamInfo;
+  }
+
   // Serve HLS playlist (.m3u8)
   router.get('/hls/:streamId/stream.m3u8', (req, res) => {
     const streamId = req.params.streamId;
@@ -55,6 +268,46 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     const streamKey = hlsStreamByDir.get(streamId);
     const info = streamKey ? hlsStreams.get(streamKey) : null;
     if (info) info.lastAccess = Date.now();
+
+    // Auto-respawn: a tombstoned (dead) entry or a playlist that stopped
+    // updating means the pipeline stalled — start a fresh ffmpeg in the
+    // background so the client's next polls pick up a live playlist again.
+    if (info && !info.respawning) {
+      // A missing playlist means the pipeline is still starting (fresh spawn
+      // or in-flight respawn cleans the dir first) — never treat it as stale.
+      let playlistAgeMs = 0;
+      try { playlistAgeMs = Date.now() - fs.statSync(playlistPath).mtimeMs; } catch {}
+      if (shouldRespawn({
+        dead: info.dead,
+        lastRespawnAttemptAt: info.lastRespawnAttemptAt,
+        now: Date.now(),
+        respawnCooldownMs: RESPAWN_COOLDOWN_MS,
+        playlistAgeMs,
+        staleAgeMs: STALE_PLAYLIST_MS,
+      })) {
+        info.respawning = true;
+        info.lastRespawnAttemptAt = Date.now();
+        startHlsProcess({
+          streamKey: info.streamKey,
+          streamId: info.streamId,
+          streamDir: info.streamDir,
+          playlistPath: path.join(info.streamDir, 'stream.m3u8'),
+          url: info.url,
+          userId: info.userId,
+          username: info.username,
+          profile: info.profile,
+          userAgentValue: info.userAgent,
+          references: info.references,
+          lastRespawnAttemptAt: info.lastRespawnAttemptAt,
+        })
+          .then(() => logger.info({ streamKey }, '[hls] Auto-respawn started'))
+          .catch((err) => {
+            const current = hlsStreams.get(streamKey);
+            if (current) current.respawning = false;
+            logger.warn({ streamKey, err: err.message }, '[hls] Auto-respawn failed — will retry after cooldown');
+          });
+      }
+    }
 
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -120,15 +373,32 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     const streamKey = `${userId}::${streamId}`;
     const streamDir = path.join(HLS_DIR, streamId);
 
-    // If already streaming, return playlist URL
+    // Reuse only when the existing pipeline is healthy: alive, not mid-respawn,
+    // and its playlist is still being updated. Anything else falls through to
+    // a fresh start below (stale/dead pipelines are killed first).
     const existing = hlsStreams.get(streamKey);
-    if (existing) {
-      existing.references++;
-      existing.lastAccess = Date.now();
-      logger.debug({ streamKey, references: existing.references }, '[hls] Reusing existing stream');
-      res.setHeader('Cache-Control', 'no-store');
-      return res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
+    if (existing && !existing.dead && !existing.respawning) {
+      // Missing playlist = pipeline still starting — fresh, not stale.
+      let playlistAgeMs = 0;
+      try { playlistAgeMs = Date.now() - fs.statSync(path.join(streamDir, 'stream.m3u8')).mtimeMs; } catch {}
+      if (playlistAgeMs <= STALE_PLAYLIST_MS) {
+        existing.references++;
+        existing.lastAccess = Date.now();
+        logger.debug({ streamKey, references: existing.references }, '[hls] Reusing existing stream');
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
+      }
+      logger.warn({ streamKey, playlistAgeMs }, '[hls] Existing stream playlist stale — starting fresh');
     }
+
+    // Stale or dead entry: make sure no lingering ffmpeg is still writing to
+    // the stream dir before spawning a new one (prevents two ffmpegs).
+    if (existing && existing.ffmpeg) {
+      logger.warn({ streamKey }, '[hls] Killing stale ffmpeg before fresh start');
+      existing.dead = true;
+      try { existing.ffmpeg.kill('SIGKILL'); } catch {}
+    }
+    const startReferences = (existing?.references || 0) + 1;
 
     // Pre-flight: quick HEAD check to detect auth failures before spawning ffmpeg
     try {
@@ -152,148 +422,32 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
       return res.status(502).json({ error: `Cannot reach stream source: ${preflightErr.message}` });
     }
 
-    // Create stream directory — ffmpeg will write the playlist when ready
-    if (!fs.existsSync(streamDir)) fs.mkdirSync(streamDir, { recursive: true });
+    // Another request (or a poll-triggered respawn) may have spawned a fresh
+    // pipeline while the pre-flight was running — reuse it instead of
+    // spawning a second ffmpeg into the same directory.
+    const current = hlsStreams.get(streamKey);
+    if (current && current.ffmpeg && !current.dead && current !== existing) {
+      current.references++;
+      current.lastAccess = Date.now();
+      logger.debug({ streamKey, references: current.references }, '[hls] Reusing pipeline spawned during pre-flight');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ playlistUrl: `/stream/hls/${streamId}/stream.m3u8`, type: 'hls' });
+    }
+
+    // Spawn ffmpeg and register the stream entry (also cleans any previous
+    // generation's playlist/segments from the dir before starting).
     const playlistPath = path.join(streamDir, 'stream.m3u8');
-
-    // Build ffmpeg HLS command
-    // Build ffmpeg HLS command using the user's profile template
-    let cmdTemplate = (profile?.command || '-i {streamUrl} -c copy')
-      .replace(/{streamUrl}/g, url)
-      .replace(/{userAgent}|{clientUserAgent}/g, ua);
-    // Strip old output directives (pipe, file) — we replace with HLS
-    cmdTemplate = cmdTemplate.replace(/-f\s+\S+\s+pipe:\d?\s*$/, '').trim();
-    cmdTemplate = cmdTemplate.replace(/-f\s+\S+\s+\S+\s*$/, '').trim();
-    const profileArgs = (cmdTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(a => a.replace(/^"|"$/g, ''));
-
-    const isCopyMode = cmdTemplate.includes('-c copy') || cmdTemplate.includes('-c:v copy');
-    const ffmpegArgs = [
-      '-v', 'level+warning',
-      ...profileArgs,
-      // HEVC compatibility for Apple devices — only with copy mode
-      ...(isCopyMode ? ['-tag:v', 'hvc1', '-bsf:v', 'hevc_mp4toannexb'] : []),
-      '-f', 'hls',
-      '-hls_time', String(HLS_SEGMENT_TIME),
-      '-hls_list_size', String(HLS_LIST_SIZE),
-      '-hls_flags', 'delete_segments+append_list',
-      '-hls_segment_filename', path.join(streamDir, 'segment_%05d.ts'),
-      path.join(streamDir, 'stream.m3u8'),
-    ];
-
-    logger.info({ streamKey, url: url.slice(0, 80), profile: profile?.name || 'default', args: ffmpegArgs.join(' ') }, '[hls] Starting ffmpeg');
-
-    const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    const startTime = Date.now();
-    let stderrLineCount = 0;
-    let noOutputTimer;
-
-    ffmpeg.on('spawn', () => {
-      logger.info({ streamKey, pid: ffmpeg.pid }, '[hls] ffmpeg process spawned');
-      // If no stderr within 3s, log a diagnostic
-      noOutputTimer = setTimeout(() => {
-        if (stderrLineCount === 0) {
-          logger.warn({ streamKey, pid: ffmpeg.pid, elapsedMs: Date.now() - startTime }, '[hls] No stderr from ffmpeg after 3s — process may be hung or binary missing');
-        }
-      }, 3000);
-      noOutputTimer.unref();
-    });
-
-    ffmpeg.stderr.on('data', (data) => {
-      const msg = data.toString().trim();
-      if (!msg) return;
-      stderrLineCount++;
-      const isError = /error|fail|invalid|unable|cannot|refused|timed?out|denied|not found|no such/i.test(msg);
-      logger[isError ? 'warn' : 'info']({ streamKey, line: stderrLineCount, msg: msg.slice(0, 400) }, isError ? '[hls] ffmpeg stderr (warning)' : '[hls] ffmpeg');
-    });
-
-    // Also capture stdout — ffmpeg occasionally writes progress there
-    ffmpeg.stdout.on('data', (data) => {
-      const msg = data.toString().trim();
-      if (msg) logger.debug({ streamKey, msg: msg.slice(0, 200) }, '[hls] ffmpeg stdout');
-    });
-
-    const streamInfo = {
-      ffmpeg,
+    await startHlsProcess({
+      streamKey,
+      streamId,
+      streamDir,
+      playlistPath,
       url,
       userId,
       username,
-      streamKey,
-      streamId,
-      createdAt: Date.now(),
-      lastAccess: Date.now(),
-      references: 1,
-      streamDir,
-    };
-
-    hlsStreams.set(streamKey, streamInfo);
-    hlsStreamByDir.set(streamId, streamKey);
-
-    // Watchdog: monitor playlist file for segment production
-    let lastPlaylistSize = 0;
-    try { lastPlaylistSize = fs.statSync(playlistPath).size; } catch {}
-    let segmentWatchCount = 0;
-    const segmentWatchdog = setInterval(() => {
-      segmentWatchCount++;
-      try {
-        let stat;
-        try { stat = fs.statSync(playlistPath); } catch { return; } // playlist not written yet
-        const segCount = fs.readdirSync(streamDir).filter(f => f.endsWith('.ts')).length;
-        if (stat.size !== lastPlaylistSize || segCount > 0) {
-          lastPlaylistSize = stat.size;
-          logger.info({ streamKey, playlistBytes: stat.size, segmentsOnDisk: segCount, elapsedS: ((Date.now() - startTime) / 1000).toFixed(0) }, '[hls] Playlist updated — segments being produced');
-        } else if (segmentWatchCount === 5) {
-          // ~10s with no output — something is wrong
-          logger.warn({ streamKey, pid: ffmpeg.pid, elapsedS: ((Date.now() - startTime) / 1000).toFixed(0), stderrLines: stderrLineCount }, '[hls] No segments produced after 10s — input may be dead or codec incompatible');
-        }
-      } catch {}
-    }, 2000);
-    segmentWatchdog.unref();
-    const activeInfo = {
-      process: ffmpeg,
-      references: 1,
-      lastAccess: Date.now(),
-      userId,
-      username,
-      channelId: null,
-      channelName: `HLS: ${url.slice(0, 60)}`,
-      channelLogo: null,
-      streamProfileName: profile?.name || 'HLS (Built-in)',
-      startTime: new Date().toISOString(),
-      historyId: null,
-      clientIp: null,
-      streamKey,
-      isTranscoded: true,
-    };
-    activeStreamProcesses.set(streamKey, activeInfo);
-    broadcastAdminActivity(sseClients);
-
-    ffmpeg.on('close', (code, signal) => {
-      if (noOutputTimer) clearTimeout(noOutputTimer);
-      clearInterval(segmentWatchdog);
-      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-      logger[code === 0 ? 'info' : 'warn']({
-        streamKey, code, signal, durationSec: duration,
-        stderrLines: stderrLineCount,
-        hadOutput: stderrLineCount > 0,
-      }, code === 0 ? '[hls] ffmpeg exited cleanly' : '[hls] ffmpeg exited with error');
-      hlsStreams.delete(streamKey);
-      hlsStreamByDir.delete(streamId);
-      activeStreamProcesses.delete(streamKey);
-      broadcastAdminActivity(sseClients);
-      try { fs.rmSync(streamDir, { recursive: true, force: true }); } catch {}
-    });
-
-    ffmpeg.on('error', (err) => {
-      if (noOutputTimer) clearTimeout(noOutputTimer);
-      clearInterval(segmentWatchdog);
-      logger.error({ streamKey, err: err.message, code: err.code, pid: ffmpeg.pid }, '[hls] ffmpeg spawn error (binary missing or not executable?)');
-    });
-
-    ffmpeg.on('spawn', () => {
-      logger.debug({ streamKey, pid: ffmpeg.pid }, '[hls] ffmpeg process spawned');
+      profile,
+      userAgentValue: ua,
+      references: startReferences,
     });
 
     // Wait for ffmpeg to write the first segment before returning the URL.
@@ -348,6 +502,17 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
   function killHls(info, key) {
     info.references = Math.max(0, info.references - 1);
     if (info.references <= 0) {
+      if (!info.ffmpeg || info.ffmpeg.exitCode !== null) {
+        // Tombstoned entry (process already dead) — finish the cleanup the
+        // tombstone close handler deliberately skipped.
+        logger.info({ streamKey: key, reason: 'tombstone cleanup' }, '[hls] Removing dead stream entry');
+        hlsStreams.delete(key);
+        hlsStreamByDir.delete(info.streamId);
+        activeStreamProcesses.delete(key);
+        broadcastAdminActivity(sseClients);
+        try { fs.rmSync(info.streamDir, { recursive: true, force: true }); } catch {}
+        return;
+      }
       const ageSec = ((Date.now() - info.createdAt) / 1000).toFixed(1);
       logger.info({ streamKey: key, ageSec, reason: info.stopped ? 'inactivity' : 'explicit stop' }, '[hls] Killing ffmpeg');
       info.stopped = true;
@@ -468,7 +633,8 @@ export function createStreamRoutes({ getSettings, activeStreamProcesses, db, sse
     const commandTemplate = `-v level+${settings.playerLogLevel} ` + profile.command
       .replace(/{streamUrl}/g, streamUrl)
       .replace(/{userAgent}|{clientUserAgent}/g, userAgent.value);
-    const args = (commandTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(a => a.replace(/^"|"$/g, ''));
+    const parsedArgs = (commandTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(a => a.replace(/^"|"$/g, ''));
+    const args = injectInputFlags(parsedArgs, env.FFMPEG_INPUT_TIMEOUT_MS);
 
     logger.info({ streamKey, args: args.join(' ') }, 'Starting legacy ffmpeg stream');
     const ffmpeg = spawn('ffmpeg', args);

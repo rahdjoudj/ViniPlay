@@ -14,6 +14,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().default(8998),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('production'),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
+  FFMPEG_INPUT_TIMEOUT_MS: z.coerce.number().int().default(10_000),
 });
 
 function validateEnv() {
