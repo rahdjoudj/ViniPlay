@@ -54,13 +54,18 @@ RUN apt-get update && \
     echo "deb [arch=${TARGETARCH} signed-by=/usr/share/keyrings/jellyfin.gpg] https://repo.jellyfin.org/ubuntu resolute main" > /etc/apt/sources.list.d/jellyfin.list && \
     curl -fsSL https://deb.nodesource.com/setup_26.x | bash - && \
     apt-get install -y --no-install-recommends \
-    jellyfin-ffmpeg7 \
+    jellyfin-ffmpeg8 \
     nodejs && \
+    apt-get upgrade -y && \
     ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/bin/ffmpeg && \
     ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/bin/ffprobe && \
     ln -s /usr/lib/jellyfin-ffmpeg/vainfo /usr/bin/vainfo && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# Remove Canonical's pebble service manager, which ships in the ubuntu:26.04
+# base image but is unused here (adds ~9MB and carries Go stdlib CVEs).
+RUN rm -rf /usr/bin/pebble /var/lib/pebble
 
 WORKDIR /usr/src/app
 
